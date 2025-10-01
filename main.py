@@ -44,13 +44,52 @@ def get_config_from_env():
         'tickers': tickers
     }
 
+DEFAULT_LSTM_HP = {
+    "window_size": 100,
+    "hidden_size": 64,
+    "num_layers": 2,
+    "lr": 1e-3,
+    "epochs": 200,
+    "horizon": 10,
+}
+
+
+
 def get_lstm_from_env():
     action   = (os.getenv("LSTM_ACTION", "") or "").lower()
-    hp       = json.loads(os.getenv("LSTM_HP", "{}"))  # dict
+    try:
+        hp = json.loads(os.getenv("LSTM_HP", "{}"))  # dict
+    except json.JSONDecodeError:
+        hp = {}
     ticker   = (os.getenv("LSTM_TICKER", "") or "").strip()
     load_dir = (os.getenv("LSTM_LOAD_DIR", "") or "").strip()
     save_dir = (os.getenv("LSTM_SAVE_DIR", "") or "").strip()
     return action, hp, ticker, load_dir, save_dir
+
+
+def normalize_hyperparameters(hp: Dict) -> Dict:
+    """Complète les hyperparamètres manquants avec les valeurs par défaut"""
+    normalized = DEFAULT_LSTM_HP.copy()
+    if isinstance(hp, dict):
+        normalized.update({k: hp.get(k,v) for k, v in DEFAULT_LSTM_HP.items() if v is not None})
+
+    def _as_int(name):
+        try:
+            hp[name] = int(hp[name])
+        except (ValueError, TypeError):
+            hp[name] = int(DEFAULT_LSTM_HP[name])
+
+    def _as_float(name):
+        try:
+            hp[name] = float(hp[name])
+        except (ValueError, TypeError):
+            hp[name] = float(DEFAULT_LSTM_HP[name])
+
+    for key in ("window_size", "hidden_size", "num_layers", "epochs", "horizon"):
+        _as_int(key)
+    _as_float("lr")
+    return hp
+
 
 
 def print_progress(message: str, step: int = None, total_steps: int = None):
@@ -72,6 +111,15 @@ def build_pipeline(df0,collector):
     dfp = df_base[['adj_close','volume','ret']].join(ind0, how='inner')
     dfp['volume'] = np.log1p(dfp['volume'].clip(lower=0))
     return dfp.dropna()
+
+def build_features_for_ticker(collector: EuropeanETFCollector, ticker: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    df_to_pred = collector.get_one_frame(ticker)
+    if df_to_pred is None or df_to_pred.empty:
+        raise ValueError(f"Aucune donnée disponible pour le ticker {ticker}.")
+    dfp = build_pipeline(df_to_pred, collector=collector)
+    if dfp.empty:
+        raise ValueError(f"Données insuffisantes après préparation pour {ticker}.")
+    return df_to_pred, dfp
 
 
 
@@ -290,7 +338,8 @@ def pipeline_predict_proba_training(
     epochs: int = 100,
     horizon: int = 5,
     evaluate: bool = True,
-    alpha: float = 0.05
+    alpha: float = 0.05,
+    save_dir: str | None = "checkpoints/lstm_proba_latest"
 ):
     """
     Pipeline de bout en bout pour la prédiction probabiliste avec LSTM (quantiles).
@@ -331,11 +380,13 @@ def pipeline_predict_proba_training(
     print("🔧 Entraînement du modèle proba...")
     predictor.fit(df)
 
+    print(f'exemple de prédiction pour le ticker : {df["ticker"].iloc[0]}' if 'ticker' in df.columns else '')
     print(f"🔮 Prédiction des quantiles pour les {horizon} prochains pas...")
     preds = predictor.predict(df[0]) 
     print("✅ Prédiction terminée.")
 
-    predictor.save("checkpoints/lstm_proba_latest")
+    if save_dir:
+        predictor.save(save_dir)
 
     if evaluate and hasattr(predictor, "X_test_scaled_torch") and len(predictor.X_test_scaled_torch) > 0:
         print("📏 Évaluation du coverage sur l'échantillon test...")
@@ -345,6 +396,52 @@ def pipeline_predict_proba_training(
     return preds
 
 
+def run_lstm_prediction(collector : EuropeanETFCollector, ticker: str, hp: Dict, load_dir: str):
+
+    predictor = LSTMPredictorProba.load(load_dir)
+    print(f"modele chargé depuis {load_dir}")
+
+    """Exécute la prédiction LSTM pour un ticker donné avec les hyperparamètres spécifiés"""
+    df_to_pred, dfp = build_features_for_ticker(collector, ticker)
+
+    predictions = predictor.predict(dfp)
+    horizon = predictions.shape
+    expected_horizon = hp.get('horizon')
+
+    if expected_horizon and horizon != expected_horizon:
+        print(f"[WARNING] Le modèle prédit {horizon} pas, différent du paramètre attendu {expected_horizon}.")
+
+    start = dfp.index[-1] + pd.offsets.BDay(1)
+    idx_future = pd.bdate_range(start=start, periods=hp['horizon'])
+
+    df_pred_fan = pd.DataFrame({
+        'adj_close_P025': predictions[:, 0],
+        'adj_close_P50':  predictions[:, 1],
+        'adj_close_P975': predictions[:, 2],
+    }, index=idx_future)
+
+    plot_overlay(df_to_pred, df_pred_fan, feature='adj_close', ticker=ticker)
+
+
+def run_lstm_training(collector: EuropeanETFCollector, dfs: List[pd.DataFrame], hp : Dict[str, float], save_dir: str):
+
+    dfs_pipeline = [build_pipeline(df0, collector=collector) for df0 in dfs]
+    feature = ['adj_close','volume', 'ret', 'SMA_5', 'SMA_50', 'RSI_14']
+    target_feature = 'ret'
+
+    pipeline_predict_proba_training(
+        df=dfs_pipeline,
+        feature=feature,
+        target_feature=target_feature,
+        window_size=hp['window_size'],
+        hidden_size=hp['hidden_size'],
+        num_layers=hp['num_layers'],
+        lr=hp['lr'],
+        epochs=hp['epochs'],
+        horizon=hp['horizon'],
+        evaluate=False,
+        save_dir=save_dir,
+    )
 
 """     Point d'entrée principal    """
 def run_graphics():
@@ -380,12 +477,23 @@ def run_graphics():
 
 def run_prediction():
 
-    action, hp, ticker, load_dir, save_dir = get_lstm_from_env()
+    action, hp_raw, ticker, load_dir, save_dir = get_lstm_from_env()
+    hp = normalize_hyperparameters(hp_raw)
     collector_df = get_collector(
         period="max",
         interval="1d"
         )
-    collector = collector_df[0]
+    
+    try:
+        collector, dfs = get_collector(
+            period="max",
+            interval="1d"
+        )
+    except ValueError as e:
+        print(f"Erreur lors de la collecte des données : {e}")
+        sys.exit(1)
+
+    
 
     if action not in {'train', 'predict'}:
         action = 'predict' if ticker else 'train'
@@ -399,86 +507,18 @@ def run_prediction():
 
 
     if action =='predict':
-        """ On récupère ici le dernier modèle enregistré dans le répertoire load_dir """
-        if not load_dir:
-            print("Pour l'action 'predict', le répertoire de chargement doit être spécifié via LSTM_LOAD_DIR.")
+        try:
+            run_lstm_prediction(collector, ticker, load_dir, hp)
+        except Exception as exc:
+            print(f"Erreur lors de la prédiction LSTM: {exc}")
             sys.exit(1)
-        print(f"🔄 Chargement du modèle depuis {load_dir}...")
-        predictor = LSTMPredictorProba.load(load_dir)
-        print("Modèle chargé.")
-
-        df_to_pred = collector.get_one_frame(ticker)
-
-        if df_to_pred is None or df_to_pred.empty:
-            print(f"Aucune donnée disponible pour le ticker {ticker}.")
+    else:
+        try:
+            run_lstm_training(collector, dfs, hp, save_dir)
+        except Exception as exc:
+            print(f"Erreur lors de l'entraînement LSTM: {exc}")
             sys.exit(1)
 
-        dfp = build_pipeline(df_to_pred, collector=collector)
-
-        prediction = predictor.predict(dfp)
-
-
-        start = dfp.index[-1] + pd.offsets.BDay(1)
-        idx_future = pd.bdate_range(start=start, periods=horizon)
-
-
-        df_pred_fan = pd.DataFrame({
-            'adj_close_P025': prediction[:, 0],
-            'adj_close_P50':  prediction[:, 1],
-            'adj_close_P975': prediction[:, 2],
-        }, index=idx_future)
-        print("Predictions :")
-        print(df_pred_fan.head())
-        plot_overlay(df_to_pred, df_pred_fan, feature='adj_close', ticker=ticker)
-
-
-        df_pred_fan = pd.DataFrame({
-            'adj_close_P025': predictions[:, 0],
-            'adj_close_P50':  predictions[:, 1],
-            'adj_close_P975': predictions[:, 2],
-        }, index=idx_future)
-        print("Predictions :")
-        print(df_pred_fan.head())
-        plot_overlay(collector.frames[0], df_pred_fan, feature='adj_close', ticker=ticker)
-
-
-
-
-    if action == 'train':
-
-        
-        print("Data after adding indicators:")
-        # print(df_pipeline.head())
-
-        dfs_pipelines = [build_pipeline(df0, collector=collector) for df0 in collector.frames]
-
-        feature = ['adj_close','volume', 'ret', 'SMA_5', 'SMA_50', 'RSI_14']
-        target_feature = 'ret'
-
-        horizon = 5
-        window_size = 100
-
-
-        predictions = pipeline_predict_proba_training(
-            df=dfs_pipelines,
-            feature=feature,
-            target_feature=target_feature,
-            window_size=window_size,
-            hidden_size=50,
-            num_layers=2,
-            lr=1e-3,          
-            epochs=10,
-            horizon=horizon,
-            evaluate=False
-        )
-        start = dfs_pipelines[0].index[-1] + pd.offsets.BDay(1)
-        idx_future = pd.bdate_range(start=start, periods=horizon)
-
-        df_pred_fan = pd.DataFrame({
-            'adj_close_P025': predictions[:, 0],
-            'adj_close_P50':  predictions[:, 1],
-            'adj_close_P975': predictions[:, 2],
-        }, index=idx_future)
 
 
 def launch_ui():
