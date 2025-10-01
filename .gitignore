@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.ipynb_checkpoints/
+
+# Environnements
+.venv/
+venv/
+.env
+.env.*
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Données & artefacts
+data/
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+
+# Fichiers locaux de l’app
+etf_settings.json
