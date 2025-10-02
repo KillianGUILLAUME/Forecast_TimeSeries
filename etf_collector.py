@@ -76,61 +76,14 @@ class EuropeanETFCollector:
         columns = [date, ticker, open, high, low, close, adj_close, volume, dividends, stock_splits]
         """
 
-        if ticker is not None:
-            df = yf.download(
-                tickers=t,
-                period=period,
-                interval=interval,
-                group_by="column",
-                actions=True,
-                auto_adjust=False,   # on garde Close et Adj Close séparés
-                progress=False,
-                threads=True
-            )
-            if isinstance(df.columns, pd.MultiIndex):
-                if df.columns.nlevels == 2 and len(df.columns.get_level_values(1).unique()) == 1:
-                    df.columns = df.columns.droplevel(1)
-                else:
-                    df.columns = ['_'.join(col).strip() for col in df.columns.values]
-
-            if df.empty:
-                print(f"Aucune donnée trouvée pour {t}. Vérifiez le ticker.")
-                return []
-            
-
-            rename_map = {
-            "Open": "open",
-            "High": "high",
-            "Low": "low",
-            "Close": "close",
-            "Adj Close": "adj_close",
-            "Volume": "volume",
-            "Dividends": "dividends",
-            "Stock Splits": "stock_splits"}
-
-            df = df.rename(columns=rename_map).sort_index()
-            for c in ["open", "high", "low", "close", "adj_close", "dividends", "stock_splits"]:
-                if c in df.columns:
-                    col = df[c]
-                    if isinstance(col, pd.DataFrame):
-                        col = col.iloc[:, 0]
-                    df[c] = pd.to_numeric(col, errors="coerce")
-            if "volume" in df.columns:
-                col = df["volume"]
-                if isinstance(col, pd.DataFrame):
-                    col = col.iloc[:, 0]
-                df["volume"] = pd.to_numeric(col, errors="coerce").astype("int16")
-
-
-
-
+        tickers_to_fetch = self.get_tickers() if ticker is None else ticker
         kept_tickers : List[str] = []
 
         # actions=True pour récupérer Dividends / Stock Splits
 
-        frames = []
+        frames: List[pd.DataFrames] = []
 
-        for t in self.tickers:
+        for t in tickers_to_fetch:
             print(f"Téléchargement des données pour {t}...")
 
             df = yf.download(
@@ -144,38 +97,11 @@ class EuropeanETFCollector:
                 threads=True
             )
 
-            if isinstance(df.columns, pd.MultiIndex):
-                if df.columns.nlevels == 2 and len(df.columns.get_level_values(1).unique()) == 1:
-                    df.columns = df.columns.droplevel(1)
-                else:
-                    df.columns = ['_'.join(col).strip() for col in df.columns.values]
-
             if df.empty:
                 print(f"Aucune donnée trouvée pour {t}. Vérifiez le ticker.")
                 continue
-
-            rename_map = {
-            "Open": "open",
-            "High": "high",
-            "Low": "low",
-            "Close": "close",
-            "Adj Close": "adj_close",
-            "Volume": "volume",
-            "Dividends": "dividends",
-            "Stock Splits": "stock_splits"}
-
-            df = df.rename(columns=rename_map).sort_index()
-            for c in ["open", "high", "low", "close", "adj_close", "dividends", "stock_splits"]:
-                if c in df.columns:
-                    col = df[c]
-                    if isinstance(col, pd.DataFrame):
-                        col = col.iloc[:, 0]
-                    df[c] = pd.to_numeric(col, errors="coerce")
-            if "volume" in df.columns:
-                col = df["volume"]
-                if isinstance(col, pd.DataFrame):
-                    col = col.iloc[:, 0]
-                df["volume"] = pd.to_numeric(col, errors="coerce").astype("int16")
+            
+            df = clean_yf_frame(df)
 
             df["ticker"] = t  # utile pour filtrer ensuite
 
