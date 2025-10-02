@@ -101,6 +101,7 @@ class ETFAnalysisGUI:
         self.econ_answer_widget = None
         self.econ_submit_btn = None
         self.econ_status_var = tk.StringVar(value="")
+        self._econ_worker = None
 
 
 
@@ -598,7 +599,8 @@ class ETFAnalysisGUI:
             )
             return
 
-        if self._econ_worker and self._econ_worker.is_alive():
+        worker = getattr(self, "_econ_worker", None)
+        if worker and worker.is_alive():
             messagebox.showinfo(
                 "Requête en cours",
                 "Veuillez patienter que la réponse précédente soit terminée.",
