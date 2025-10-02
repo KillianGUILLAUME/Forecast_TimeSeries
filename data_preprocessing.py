@@ -132,7 +132,7 @@ def fetch_macro_series(
     if start is None or end is None:
         return pd.DataFrame()
 
-    alias_map = tickers or FOREX_TICKERS
+    alias_map = FOREX_TICKERS if tickers is None else tickers
     columns: Dict[str, pd.Series] = {}
 
     for macro_ticker, alias in alias_map.items():
@@ -246,6 +246,7 @@ def load_prepared_ticker(
     period: str = "5y",
     interval: str = "1d",
     macro_tickers: Optional[Dict[str, str]] = None,
+    include_macro:bool = True,
 ) -> PreparedTickerData:
     """Download a ticker and return both raw history and engineered features."""
 
@@ -253,12 +254,14 @@ def load_prepared_ticker(
     if raw.empty:
         return PreparedTickerData(ticker=ticker, raw=pd.DataFrame(), features=pd.DataFrame())
 
-    macro = fetch_macro_series(
-        start=raw.index.min(),
-        end=raw.index.max(),
-        interval=interval,
-        tickers=macro_tickers,
-    )
+    macro = None
+    if include_macro:
+        macro = fetch_macro_series(
+            start=raw.index.min(),
+            end=raw.index.max(),
+            interval=interval,
+            tickers=macro_tickers,
+        )
     features = build_lstm_features(raw, macro=macro)
 
     return PreparedTickerData(ticker=ticker, raw=raw, features=features)
@@ -271,6 +274,8 @@ def prepare_lstm_training_datasets(
     interval: str = "1d",
     window_size: Optional[int] = None,
     macro_tickers: Optional[Dict[str, str]] = None,
+    include_forex: bool = True,
+    forex_tickers: Optional[Dict[str, object]] = None,
 ) -> Tuple[List[pd.DataFrame], Dict[str, object]]:
     """Prepare datasets for the probabilistic LSTM training loop."""
 
@@ -294,6 +299,30 @@ def prepare_lstm_training_datasets(
             continue
         datasets.append(prepared.features)
         kept.append((ticker, len(prepared.features)))
+
+    if include_forex:
+        if forex_tickers is not None:
+            forex_map = forex_tickers
+        elif macro_tickers:
+            forex_map = macro_tickers
+        else:
+            forex_map = FOREX_TICKERS
+        for forex_ticker, alias in forex_map.items():
+            prepared = load_prepared_ticker(
+                forex_ticker,
+                period=period,
+                interval=interval,
+                macro_tickers=forex_map,
+            )
+            if prepared.features.empty:
+                dropped[alias] = "aucune donnée exploitable"
+                continue
+            if window_size is not None and len(prepared.features) < window_size:
+                dropped[alias] = f"série trop courte ({len(prepared.features)} < {window_size})"
+                continue
+            datasets.append(prepared.features)
+            kept.append((alias, len(prepared.features)))
+
 
     metadata = {"kept": kept, "dropped": dropped}
     return datasets, metadata
