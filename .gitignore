@@ -27,3 +27,4 @@ checkpoints/
 
 # Fichiers locaux de l’app
 etf_settings.json
+commande_python.py
