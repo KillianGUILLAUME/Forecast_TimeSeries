@@ -319,6 +319,8 @@ def get_collector(
 
 
 def run_lstm_prediction(collector : EuropeanETFCollector, ticker: str, hp: Dict, load_dir: str):
+    from prediction_lstm_model import LSTMPredictorProba
+    from plot_prediction import plot_overlay
 
     if not isinstance(load_dir, str):
         raise TypeError(
@@ -380,6 +382,8 @@ def run_lstm_training(
     tickers: Optional[List[str]] = None,
     period: str = "max",
     interval: str = "1d",):
+    
+    from prediction_lstm_model import LSTMPredictorProba
 
     if not save_dir:
         print("Pour l'action 'train', le répertoire de sauvegarde doit être spécifié via LSTM_SAVE_DIR.")
@@ -463,8 +467,6 @@ def run_graphics():
 
 
 def run_prediction():
-    from prediction_lstm_model import LSTMPredictorProba
-    from plot_prediction import plot_overlay
 
     action, raw_hp, ticker, load_dir, save_dir = get_lstm_from_env()
     hp = normalize_lstm_hp(raw_hp)

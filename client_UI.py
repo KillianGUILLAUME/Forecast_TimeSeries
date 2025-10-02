@@ -1,6 +1,7 @@
 import tkinter as tk
 import ttkbootstrap as ttk
-from tkinter import  messagebox,filedialog
+from tkinter import  messagebox,filedialog, scrolledtext
+
 
 import subprocess
 from pathlib import Path
@@ -12,6 +13,8 @@ import requests
 import threading
 
 from dataclasses import dataclass, asdict
+from services.genai_service import fetch_economic_answer
+
 
 
 @dataclass
@@ -94,6 +97,13 @@ class ETFAnalysisGUI:
 
 
         self.econ_win = None
+        self.econ_question_widget = None
+        self.econ_answer_widget = None
+        self.econ_submit_btn = None
+        self.econ_status_var = tk.StringVar(value="")
+
+
+
         self.math_win = None
         
         self.period_var = tk.StringVar(value="max")
@@ -431,8 +441,9 @@ class ETFAnalysisGUI:
     def selected_gaphics_tickers(self) -> list[str]:
         """Récupère les tickers sélectionnés dans le module graphique (compare ou single)"""
         sel = []
-        if hasattr(self, 'get_compare_seclection') and callable(self.get_compare_selection):
-            sel.extend(self.get_compare_selection() or [])
+        compare_getter = getattr(self, "get_compare_selection", None)
+        if callable(compare_getter):
+            sel.extend(compare_getter() or [])
         if (not sel and hasattr(self, 'get_single_selection') 
             and callable(self.get_single_selection)):
             sel.extend(self.get_single_selection() or [])
@@ -505,17 +516,118 @@ class ETFAnalysisGUI:
 
 
     def open_econ_window(self):
-        """Fenêtre enfant pour le module 'Economic Question' (placeholder)."""
+        """Fenêtre enfant pour le module 'Economic Question'."""
         top = self.open_child("econ", "Economic Question — Outils")
+
+        if getattr(top, "_econ_ui_ready", False):
+            if self._widget_exists(self.econ_question_widget):
+                try:
+                    self.econ_question_widget.focus_set()
+                except Exception:
+                    pass
+            return top
+
         container = ttk.Frame(top, padding=16)
         container.pack(fill="both", expand=True)
 
-        ttk.Label(container, text="📊 Module Economic Question",
-                font=("Arial", 14, "bold")).pack(anchor="w", pady=(0, 10))
-        ttk.Label(container, text="(À venir) Posez une question économique et explorez des réponses/outils.").pack(anchor="w")
+        ttk.Label(
+            container,
+            text="📊 Module Economic Question",
+            font=("Arial", 14, "bold"),
+        ).pack(anchor="w", pady=(0, 10))
+        self.econ_status_var.set("")
+        ttk.Label(
+            container,
+            text=(
+                "Posez une question économique (croissance, inflation, politique monétaire, "
+                "etc.). La réponse sera générée à l'aide d'un modèle OpenAI."
+            ),
+            wraplength=520,
+            justify="left",
+        ).pack(anchor="w")
+        question_frame = ttk.LabelFrame(container, text="Votre question", padding=10)
+        question_frame.pack(fill="both", expand=False, pady=(12, 10))
 
-        ttk.Frame(container).pack(fill="x", pady=8)  # espace
-        ttk.Button(container, text="Fermer", command=top.destroy).pack(anchor="e")
+        if not self.econ_question_widget or not self.econ_question_widget.winfo_exists():
+            self.econ_question_widget = scrolledtext.ScrolledText(
+                question_frame,
+                height=4,
+                wrap="word",
+            )
+        self.econ_question_widget.pack(fill="both", expand=True)
+        self.econ_question_widget.delete("1.0", tk.END)
+
+        controls = ttk.Frame(container)
+        controls.pack(fill="x", pady=(0, 10))
+
+        submit_btn = ttk.Button(
+            controls,
+            text="Obtenir une réponse",
+            command=self.submit_econ_question,
+        )
+        submit_btn.pack(side="left")
+
+        ttk.Label(controls, textvariable=self.econ_status_var).pack(
+            side="left", padx=10
+        )
+
+        answer_frame = ttk.LabelFrame(container, text="Réponse", padding=10)
+        answer_frame.pack(fill="both", expand=True)
+
+        if not self.econ_answer_widget or not self.econ_answer_widget.winfo_exists():
+            self.econ_answer_widget = scrolledtext.ScrolledText(
+                answer_frame,
+                height=12,
+                state="disabled",
+                wrap="word",
+            )
+        self.econ_answer_widget.pack(fill="both", expand=True)
+        self.display_econ_answer("")
+
+        ttk.Button(container, text="Fermer", command=top.destroy).pack(anchor="e", pady=(12, 0))
+
+    def submit_econ_question(self):
+        if not self.econ_question_widget or not self.econ_question_widget.winfo_exists():
+            return
+
+        question = self.econ_question_widget.get("1.0", tk.END).strip()
+        if not question:
+            messagebox.showwarning(
+                "Question manquante",
+                "Veuillez saisir une question économique avant d'envoyer la requête.",
+            )
+            return
+
+        if self._econ_worker and self._econ_worker.is_alive():
+            messagebox.showinfo(
+                "Requête en cours",
+                "Veuillez patienter que la réponse précédente soit terminée.",
+            )
+            return
+
+        self.econ_status_var.set("Consultation de l'API…")
+        self.display_econ_answer("Réflexion en cours…")
+
+        def _worker():
+            answer = fetch_economic_answer(question)
+            self.master.after(0, lambda: self._complete_econ_request(answer))
+
+        self._econ_worker = threading.Thread(target=_worker, daemon=True)
+        self._econ_worker.start()
+
+    def _complete_econ_request(self, answer: str):
+        self.display_econ_answer(answer)
+        status = "Réponse reçue." if answer else ""
+        self.econ_status_var.set(status)
+
+    def display_econ_answer(self, text: str):
+        if not self.econ_answer_widget or not self.econ_answer_widget.winfo_exists():
+            return
+
+        self.econ_answer_widget.configure(state="normal")
+        self.econ_answer_widget.delete("1.0", tk.END)
+        self.econ_answer_widget.insert("1.0", text)
+        self.econ_answer_widget.configure(state="disabled")
 
 
     """ Maths window"""

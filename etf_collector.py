@@ -250,6 +250,6 @@ class EuropeanETFCollector:
 
         df_indicator = indicator_frames[0][['SMA_5', 'SMA_50', 'RSI_14']]
 
-        df = pd.concat(df_base, df_indicator, axis=1)
+        df = pd.concat([df_base, df_indicator], axis=1)
 
         return df
