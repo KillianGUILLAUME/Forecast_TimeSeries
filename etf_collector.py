@@ -179,9 +179,6 @@ class EuropeanETFCollector:
 
             df["ticker"] = t  # utile pour filtrer ensuite
 
-            print(f"\n[{t}] head()\n")
-            print(df.head())
-
             frames.append(df)
             kept_tickers.append(t)
 
@@ -270,9 +267,7 @@ class EuropeanETFCollector:
             df_ind['RSI_14'] = 100 - (100 / (1 + rs))
             indicators_frames.append(df_ind)
 
-            print('head in etf_get_indicator\n')
-            print(df.head())
-        
+
         return indicators_frames
     
 
@@ -322,6 +317,3 @@ class EuropeanETFCollector:
             df_indicator = self.get_indicator([df_base])
 
             df = pd.concat(df_base, df_indicator, ignore_index=False)
-
-
-

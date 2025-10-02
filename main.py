@@ -23,7 +23,13 @@ from typing import List, Dict, Optional
 
 
 from prediction_lstm_model import LSTMPredictor, LSTMPredictorProba
-
+from data_preprocessing import (
+    LSTM_FEATURE_COLUMNS,
+    TARGET_COLUMN,
+    load_prepared_ticker,
+    prepare_lstm_training_datasets,
+    resolve_training_universe,
+)
 
 
 from plot_prediction import plot_overlay
@@ -53,13 +59,25 @@ DEFAULT_LSTM_HP = {
     "horizon": 10,
 }
 
+HP_CASTERS = {
+    "window_size": int,
+    "hidden_size": int,
+    "num_layers": int,
+    "lr": float,
+    "epochs": int,
+    "horizon": int,
+}
+
+
 
 
 def get_lstm_from_env():
     action   = (os.getenv("LSTM_ACTION", "") or "").lower()
+    raw_hp   = os.getenv("LSTM_HP", "{}")
     try:
-        hp = json.loads(os.getenv("LSTM_HP", "{}"))  # dict
+        hp = json.loads(raw_hp) if raw_hp else {}
     except json.JSONDecodeError:
+        print("Hyperparamètres LSTM invalides, utilisation des valeurs par défaut.")
         hp = {}
     ticker   = (os.getenv("LSTM_TICKER", "") or "").strip()
     load_dir = (os.getenv("LSTM_LOAD_DIR", "") or "").strip()
@@ -67,28 +85,20 @@ def get_lstm_from_env():
     return action, hp, ticker, load_dir, save_dir
 
 
-def normalize_hyperparameters(hp: Dict) -> Dict:
-    """Complète les hyperparamètres manquants avec les valeurs par défaut"""
-    normalized = DEFAULT_LSTM_HP.copy()
-    if isinstance(hp, dict):
-        normalized.update({k: hp.get(k,v) for k, v in DEFAULT_LSTM_HP.items() if v is not None})
-
-    def _as_int(name):
+def normalize_lstm_hp(raw_hp: Dict) -> Dict[str, float]:
+    """Normalise les hyperparamètres reçus (convertit en bons types + défauts)."""
+    hp = DEFAULT_LSTM_HP.copy()
+    if not isinstance(raw_hp, dict):
+        return hp
+    for key, caster in HP_CASTERS.items():
+        if key not in raw_hp:
+            continue
         try:
-            hp[name] = int(hp[name])
-        except (ValueError, TypeError):
-            hp[name] = int(DEFAULT_LSTM_HP[name])
-
-    def _as_float(name):
-        try:
-            hp[name] = float(hp[name])
-        except (ValueError, TypeError):
-            hp[name] = float(DEFAULT_LSTM_HP[name])
-
-    for key in ("window_size", "hidden_size", "num_layers", "epochs", "horizon"):
-        _as_int(key)
-    _as_float("lr")
+            hp[key] = caster(raw_hp[key])
+        except (TypeError, ValueError):
+            print(f"Hyperparamètre '{key}' invalide ({raw_hp[key]!r}), valeur par défaut {hp[key]} conservée.")
     return hp
+
 
 
 
@@ -102,15 +112,65 @@ def print_progress(message: str, step: int = None, total_steps: int = None):
     sys.stdout.flush()  
 
 
-def build_pipeline(df0,collector):
-    df_base = df0[['adj_close', 'volume']].copy()
+def build_pipeline(df0: pd.DataFrame) -> pd.DataFrame:
+    """Construit le df des indicateurs utilisé par le LSTM."""
+
+    if not isinstance(df0, pd.DataFrame):
+        raise TypeError("build_pipeline attend un DataFrame en entrée")
+
+    required_cols = ['adj_close', 'volume']
+    missing = set(required_cols).difference(df0.columns)
+    if missing:
+        raise ValueError(f"Colonnes manquantes pour le pipeline: {sorted(missing)}")
+
+    df_base = df0[list(required_cols)].copy()
+    df_base = df_base.astype({c: float for c in required_cols if c in df_base})
     df_base['ret'] = np.log(df_base['adj_close']).diff()
-    ind0 = collector.get_indicator([df_base])[0]
-    if 'ticker' in ind0.columns: ind0 = ind0.drop(columns=['ticker'])
-    ind0 = ind0[['SMA_5', 'SMA_50', 'RSI_14']]
-    dfp = df_base[['adj_close','volume','ret']].join(ind0, how='inner')
-    dfp['volume'] = np.log1p(dfp['volume'].clip(lower=0))
-    return dfp.dropna()
+
+
+    price = df_base['adj_close']
+    df_base['SMA_5'] = price.rolling(window=5, min_periods=5).mean()
+    df_base['SMA_50'] = price.rolling(window=50, min_periods=50).mean()
+
+    delta = price.diff()
+    gain = delta.clip(lower=0).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.clip(upper=0)).rolling(window=14, min_periods=14).mean()
+    loss = loss.replace(0, np.nan)
+    rs = gain / loss
+    df_base['RSI_14'] = 100 - (100 / (1 + rs))
+    df_base['RSI_14'] = df_base['RSI_14'].fillna(100)
+
+    df_base['volume'] = np.log1p(df_base['volume'].clip(lower=0))
+
+    df_features = df_base[LSTM_FEATURES].dropna()
+    if df_features.empty:
+        raise ValueError("Pipeline LSTM vide après préparation des indicateurs.")
+
+    return df_features
+
+
+LSTM_FEATURES = ['adj_close', 'volume', 'ret', 'SMA_5', 'SMA_50', 'RSI_14']
+TARGET_FEATURE = 'ret'
+
+
+def build_lstm_training_frames(frames: List[pd.DataFrame], window_size: int) -> List[pd.DataFrame]:
+    """Construit les jeux de données enrichis pour l'entraînement (retire les séries trop courtes)."""
+    processed = []
+    for df in frames:
+        if df is None or df.empty:
+            continue
+        try:
+            dfp = build_pipeline(df)
+        except (ValueError, TypeError) as exc:
+            print(f"Impossible de construire le pipeline pour une série: {exc}")
+            continue
+        if len(dfp) < window_size:
+            print(f"Série ignorée (longueur {len(dfp)} < fenêtre {window_size}).")
+            continue
+        processed.append(dfp)
+    return processed
+
+
 
 def build_features_for_ticker(collector: EuropeanETFCollector, ticker: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     df_to_pred = collector.get_one_frame(ticker)
@@ -123,7 +183,7 @@ def build_features_for_ticker(collector: EuropeanETFCollector, ticker: str) -> t
 
 
 
-def run_pipeline(
+def run_pipeline_for_graphics(
     tickers: Optional[List[str]] = None,
     period: str = "5y",
     interval: str = "1d",
@@ -328,7 +388,7 @@ def pipeline_predict(
 
 
 def pipeline_predict_proba_training(
-    df: pd.DataFrame,
+    df: List[pd.DataFrame],
     feature: List[str],
     target_feature: str,
     window_size: int = 10,
@@ -397,12 +457,28 @@ def pipeline_predict_proba_training(
 
 
 def run_lstm_prediction(collector : EuropeanETFCollector, ticker: str, hp: Dict, load_dir: str):
+    if not load_dir:
+        print("Pour l'action 'predict', le répertoire de chargement doit être spécifié via LSTM_LOAD_DIR.")
+        sys.exit(1)
+    if not ticker:
+        print("Pour l'action 'predict', le ticker doit être spécifié via LSTM_TICKER.")
+        sys.exit(1)
+
 
     predictor = LSTMPredictorProba.load(load_dir)
     print(f"modele chargé depuis {load_dir}")
 
-    """Exécute la prédiction LSTM pour un ticker donné avec les hyperparamètres spécifiés"""
-    df_to_pred, dfp = build_features_for_ticker(collector, ticker)
+    df_to_pred = collector.get_one_frame(ticker)
+    if df_to_pred is None or df_to_pred.empty:
+        print(f"Aucune donnée disponible pour le ticker {ticker}.")
+        sys.exit(1)
+
+    dfp = build_pipeline(df_to_pred)
+    if len(dfp) < predictor.window_size:
+        print(
+            f"Données insuffisantes pour effectuer une prédiction (fenêtre requise: {predictor.window_size}, observations: {len(dfp)})."
+        )
+        sys.exit(1)
 
     predictions = predictor.predict(dfp)
     horizon = predictions.shape
@@ -423,27 +499,63 @@ def run_lstm_prediction(collector : EuropeanETFCollector, ticker: str, hp: Dict,
     plot_overlay(df_to_pred, df_pred_fan, feature='adj_close', ticker=ticker)
 
 
-def run_lstm_training(collector: EuropeanETFCollector, dfs: List[pd.DataFrame], hp : Dict[str, float], save_dir: str):
+def run_lstm_training(
+    hp: Dict[str, float],
+    save_dir: str,
+    *,
+    tickers: Optional[List[str]] = None,
+    period: str = "max",
+    interval: str = "1d",):
 
-    dfs_pipeline = [build_pipeline(df0, collector=collector) for df0 in dfs]
-    feature = ['adj_close','volume', 'ret', 'SMA_5', 'SMA_50', 'RSI_14']
-    target_feature = 'ret'
+    if not save_dir:
+        print("Pour l'action 'train', le répertoire de sauvegarde doit être spécifié via LSTM_SAVE_DIR.")
+        sys.exit(1)
 
-    pipeline_predict_proba_training(
-        df=dfs_pipeline,
-        feature=feature,
-        target_feature=target_feature,
+    window_size = hp['window_size']
+
+    datasets, metadata = prepare_lstm_training_datasets(
+        tickers=tickers,
+        period=period,
+        interval=interval,
+        window_size=window_size,
+    )
+
+    kept = metadata.get('kept', [])
+    dropped = metadata.get('dropped', {})
+
+    if kept:
+        print("Séries retenues pour l'entraînement :")
+        for name, length in kept:
+            print(f"  • {name}: {length} observations après préparation")
+    if dropped:
+        print("Séries ignorées :")
+        for name, reason in dropped.items():
+            print(f"  • {name}: {reason}")
+
+    if not datasets:
+        print("Aucune série suffisante pour l'entraînement après préparation des données.")
+        sys.exit(1)
+
+
+    print(f'modele training with {len(datasets)} series, window_size={window_size}')
+
+    predictor = LSTMPredictorProba(
+        feature=LSTM_FEATURES,
+        target_feature=TARGET_FEATURE,
         window_size=hp['window_size'],
         hidden_size=hp['hidden_size'],
         num_layers=hp['num_layers'],
         lr=hp['lr'],
         epochs=hp['epochs'],
-        horizon=hp['horizon'],
-        evaluate=False,
-        save_dir=save_dir,
-    )
+        horizon=hp['horizon'])
 
-"""     Point d'entrée principal    """
+    predictor.fit(datasets)
+
+    os.makedirs(save_dir, exist_ok=True)
+    predictor.save(save_dir)
+    print("✅ Entraînement terminé et modèle sauvegardé.")
+
+
 def run_graphics():
     config = get_config_from_env()
     sel_tickers = config.get('tickers') or []
@@ -463,7 +575,7 @@ def run_graphics():
 
     print(f"[DEBUG] action={action} tickers={sel_tickers}")
 
-    run_pipeline(
+    run_pipeline_for_graphics(
         tickers=sel_tickers,
         period=config['period'],
         interval=config['interval'],
@@ -477,9 +589,15 @@ def run_graphics():
 
 def run_prediction():
 
-    action, hp_raw, ticker, load_dir, save_dir = get_lstm_from_env()
-    hp = normalize_hyperparameters(hp_raw)
-    collector_df = get_collector(
+    action, raw_hp, ticker, load_dir, save_dir = get_lstm_from_env()
+    hp = normalize_lstm_hp(raw_hp)
+
+    env_config = get_config_from_env()
+    period = "max" if env_config.get('max', True) else env_config.get('period', '5y')
+    interval = env_config.get('interval', '1d')
+
+
+    collector, frames = get_collector(
         period="max",
         interval="1d"
         )
@@ -513,11 +631,19 @@ def run_prediction():
             print(f"Erreur lors de la prédiction LSTM: {exc}")
             sys.exit(1)
     else:
-        try:
-            run_lstm_training(collector, dfs, hp, save_dir)
-        except Exception as exc:
-            print(f"Erreur lors de l'entraînement LSTM: {exc}")
-            sys.exit(1)
+        env_candidates = [
+            os.getenv('LSTM_TRAIN_TICKERS'),
+            os.getenv('LSTM_TICKERS'),
+            os.getenv('ETF_TICKERS'),
+        ]
+        tickers = resolve_training_universe(env_candidates)
+        run_lstm_training(
+            hp=hp,
+            save_dir=save_dir,
+            tickers=tickers,
+            period=period,
+            interval=interval,
+        )
 
 
 

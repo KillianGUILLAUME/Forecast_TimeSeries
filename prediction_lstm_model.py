@@ -7,7 +7,7 @@ import pandas as pd
 
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import matplotlib.pyplot as plt
 
@@ -437,7 +437,12 @@ class LSTMModelProba(nn.Module):
 
 class LSTMPredictorProba:
     def __init__(self, feature: List[str], target_feature :str, window_size: int=10, hidden_size: int=50, horizon : int = 10, num_layers: int=3, lr: float=0.001, epochs: int=1000):
-        self.feature = feature
+        unique_features = []
+        for name in feature:
+            if name not in unique_features:
+                unique_features.append(name)
+
+        self.feature = unique_features
         self.target_feature = target_feature
         self.quantiles = (0.025, 0.5, 0.975)
         self.window_size = window_size
@@ -452,16 +457,36 @@ class LSTMPredictorProba:
         self.model = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def fit(self, df: pd.DataFrame):
+    def fit(self, frames: Union[pd.DataFrame, List[pd.DataFrame]]):
 
-        seq_list, targ_list = [], []
-        for df in df:
+
+        if isinstance(frames, pd.DataFrame):
+            iterable =[frames]
+        else:
+            iterable = list(frames)
+
+
+        seq_list, targ_list, indices = [], [], []
+
+        for frame in iterable:
+            if frame is None or len(frame) == 0:
+                continue 
+            if frame.columns.duplicated().any():
+                frame = frame.loc[:, ~frame.columns.duplicated()].copy() # remove duplicated columns
+
+            missing = [col for col in self.feature if col not in frame.columns]
+            if missing:
+                print(f"[WARNING] Frame missing features {missing}, skipping")
+                continue
+        for frame in iterable:
             s, t = make_sequence_multi_horizon(
-                df, feature=self.feature, target_feature=self.target_feature,
+                frame, feature=self.feature, target_feature=self.target_feature,
                 window_size=self.window_size, H=self.output_h
             )
             if len(s) > 0:
-                seq_list.append(s); targ_list.append(t)
+                seq_list.append(s)
+                targ_list.append(t)
+                indices.append(frame.index)
 
         if not seq_list:
             raise ValueError("Aucune séquence générée (données insuffisantes).")
@@ -469,12 +494,45 @@ class LSTMPredictorProba:
         sequences = torch.cat(seq_list, dim=0)
         targets   = torch.cat(targ_list, dim=0)
 
+        # --- Aperçu du dataset construit ---
+        N, T, F = sequences.shape
+        H = targets.shape[1]
+        print(f"\n[PREVIEW] sequences: N={N}, T={T}, F={F} | targets: H={H}")
+        print(f"Features utilisées (ordre): {self.feature}")
+
+        # 1) stats globales par feature (sur toutes les séquences et toutes les étapes)
+        with torch.no_grad():
+            feat_mean = sequences.float().mean(dim=(0, 1)).cpu().numpy()
+            feat_std  = sequences.float().std(dim=(0, 1)).cpu().numpy()
+        print("\n[Stats globales] mean/std par feature:")
+        for j, name in enumerate(self.feature):
+            print(f" - {name:<10} mean={feat_mean[j]:.6f}  std={feat_std[j]:.6f}")
+
+        # 2) première fenêtre (T x F) sous forme de DataFrame lisible
+        try:
+            seq0 = sequences[0].detach().cpu().numpy()   # (T, F)
+            df_seq0 = pd.DataFrame(seq0, columns=self.feature)
+            print("\n[Window #0] premières lignes de la fenêtre (T x F):")
+            with pd.option_context("display.max_columns", None, "display.width", 160):
+                print(df_seq0.head(5))
+        except Exception as e:
+            print(f"[WARN] impossible d'afficher la première fenêtre: {e}")
+
+        # 3) première cible (H) = rendements log cumulés (ou ce que tu prépares dans make_sequence...)
+        try:
+            targ0 = targets[0].detach().cpu().numpy()
+            print("\n[Target #0] (horizon cumulatif):")
+            print(np.round(targ0, 6))
+        except Exception as e:
+            print(f"[WARN] impossible d'afficher la première cible: {e}")
+
+
         # sequences, targets = make_sequence_multi_horizon(df, feature = self.feature, target_feature=self.target_feature, window_size=self.window_size, H =self.output_h)
         X_train, y_train, X_test, y_test = split_data(sequences, targets)
 
 
 
-        self.df_index_ = df.index
+        self.df_index_ = indices[-1] if indices else None
 
 
         Ntr, T, F = X_train.shape
@@ -517,16 +575,7 @@ class LSTMPredictorProba:
         train_ds = torch.utils.data.TensorDataset(X_train_scaled_torch.float(), y_train_last)
         train_dl = torch.utils.data.DataLoader(train_ds, batch_size=32, shuffle=True)
 
-
-        print("y_train ret mean/std:", y_train.mean().item(), y_train.std().item())
-        print("y_test  ret mean/std:", y_test.mean().item(),  y_test.std().item())
-
-        # après scaling
-        print("y_train_sc mean/std:", self.scaler_y.transform(y_train.numpy()).mean(),
-                                    self.scaler_y.transform(y_train.numpy()).std())
-        print("y_test_sc  mean/std:", y_test_scaled.mean(),
-                                    y_test_scaled.std())
-
+        print(train_dl.dataset, train_dl.dataset.tensors[0].shape, train_dl.dataset.tensors[1].shape)
          
         """         Modele LSTM proba         """
 

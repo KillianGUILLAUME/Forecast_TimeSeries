@@ -1,10 +1,9 @@
 import tkinter as tk
 import ttkbootstrap as ttk
-from tkinter import  messagebox
-import subprocess
+from tkinter import  messagebox,filedialog
 
+import subprocess
 from pathlib import Path
-from tkinter import filedialog
 import json
 import os
 import sys
@@ -12,8 +11,53 @@ import sys
 import requests
 import threading
 
+from dataclasses import dataclass, asdict
 
 
+@dataclass
+class LSTMHyperParams:
+    window_size: int = 100
+    hidden_size: int = 64
+    num_layers: int = 2
+    lr: float = 1e-3
+    epochs: int = 200
+    horizon: int = 10
+
+    @classmethod
+    def from_widget(
+        cls,
+        *,
+        ws_var: tk.IntVar,
+        hs_var: tk.IntVar,
+        nl_var: tk.IntVar,
+        lr_var: tk.DoubleVar,
+        ep_var: tk.IntVar,
+        ho_var: tk.IntVar
+    ):
+        defaults = cls()
+
+        def _coerce(var: tk.Variable, caster, fallback):
+            try:
+                value=  caster(var.get())
+            except Exception:
+                return fallback
+            return value
+        
+
+        return cls(
+            window_size=ws_var.get(),
+            hidden_size=hs_var.get(),
+            num_layers=nl_var.get(),
+            lr=lr_var.get(),
+            epochs=ep_var.get(),
+            horizon=ho_var.get()
+        )
+    
+    def to_json(self) -> str:
+        return json.dumps(asdict(self))
+    
+    def as_dict(self) -> dict:
+        return asdict(self)
 
 
 class ETFAnalysisGUI:
@@ -38,13 +82,13 @@ class ETFAnalysisGUI:
         self.lstm_dir_var = tk.StringVar(value=str(self.script_path.parent / "checkpoints"))
         self.get_lstm_ticker = lambda: []
         # hyperparamètres par défaut
-        self.ws_var = tk.IntVar(value=100)
-        self.hs_var = tk.IntVar(value=64)
-        self.nl_var = tk.IntVar(value=2)
-        self.lr_var = tk.DoubleVar(value=1e-3)
-        self.ep_var = tk.IntVar(value=200)
-        self.ho_var = tk.IntVar(value=10)
-        
+        defaults = LSTMHyperParams()
+        self.ws_var = tk.IntVar(value=defaults.window_size)
+        self.hs_var = tk.IntVar(value=defaults.hidden_size)
+        self.nl_var = tk.IntVar(value=defaults.num_layers)
+        self.lr_var = tk.DoubleVar(value=defaults.lr)
+        self.ep_var = tk.IntVar(value=defaults.epochs)
+        self.ho_var = tk.IntVar(value=defaults.horizon)
 
 
 
@@ -372,6 +416,33 @@ class ETFAnalysisGUI:
         ttk.Button(btns, text="🔮 Prédire avec modèle chargé", command=self._lstm_predict).pack(side="left", padx=8)
         ttk.Button(btns, text="Fermer", command=top.destroy).pack(side="right")
 
+
+    def collect_lstm_hyperparams(self) -> LSTMHyperParams:
+        """Récupère les hyperparamètres depuis les widgets"""
+        return LSTMHyperParams.from_widget(
+            ws_var=self.ws_var,
+            hs_var=self.hs_var,
+            nl_var=self.nl_var,
+            lr_var=self.lr_var,
+            ep_var=self.ep_var,
+            ho_var=self.ho_var
+        )
+    
+    def selected_gaphics_tickers(self) -> list[str]:
+        """Récupère les tickers sélectionnés dans le module graphique (compare ou single)"""
+        sel = []
+        if hasattr(self, 'get_compare_seclection') and callable(self.get_compare_selection):
+            sel.extend(self.get_compare_selection() or [])
+        if (not sel and hasattr(self, 'get_single_selection') 
+            and callable(self.get_single_selection)):
+            sel.extend(self.get_single_selection() or [])
+        return [ticker for ticker in sel if ticker]
+    
+    @staticmethod
+    def bool_env(value:bool) -> str:
+        return "1" if value else "0"
+
+
     def _get_lstm_env_common(self, action: str):
         """
         Construit les variables d'environnement pour le subprocess.
@@ -379,18 +450,12 @@ class ETFAnalysisGUI:
         - En 'predict' : ticker requis, on envoie HP + LOAD_DIR + LSTM_TICKER.
         """
         # Hyperparamètres depuis l'UI
-        hp = {
-            "window_size": int(self.ws_var.get()),
-            "hidden_size": int(self.hs_var.get()),
-            "num_layers": int(self.nl_var.get()),
-            "lr": float(self.lr_var.get()),
-            "epochs": int(self.ep_var.get()),
-            "horizon": int(self.ho_var.get()),
-        }
+
+        hp = self.collect_lstm_hyperparams()
 
         extra = {
             "LSTM_ACTION": action,     # "train" | "predict"
-            "LSTM_HP": json.dumps(hp),
+            "LSTM_HP": hp.to_json(),
         }
 
         model_dir = (self.lstm_dir_var.get() or "").strip()
@@ -403,10 +468,18 @@ class ETFAnalysisGUI:
                 return None
             extra["LSTM_TICKER"] = ticker
             if model_dir:
+                if not Path(model_dir).exists():
+                    messagebox.showwarning(
+                        "Modèle introuvable",
+                        "Le dossier de checkpoints indiqué n'existe pas encore.",
+                    )
+                    return None
                 extra["LSTM_LOAD_DIR"] = model_dir
         else:
             # TRAIN : pas de ticker requis
             if model_dir:
+                Path(model_dir).mkdir(parents=True, exist_ok=True)
+                    
                 extra["LSTM_SAVE_DIR"] = model_dir
 
         return extra
@@ -485,19 +558,14 @@ class ETFAnalysisGUI:
             env.update({
                 'ETF_PERIOD': self.period_var.get(),
                 'ETF_INTERVAL': self.interval_var.get(),
-                'ETF_LIGHT': str(self.light_var.get()),
-                'ETF_MAX': str(self.max_var.get()),
-                'ETF_LOG_PLOTS': str(self.log_plots_var.get()),
-                
+                "ETF_LIGHT": self.bool_env(self.light_var.get()),
+                "ETF_MAX": self.bool_env(self.max_var.get()),
+                "ETF_LOG_PLOTS": self.bool_env(self.log_plots_var.get())
             })
 
-
             if mode == "graphics":
-                sel = []
-                if hasattr(self, "get_compare_selection") and callable(self.get_compare_selection):
-                    sel = self.get_compare_selection() or sel
-                if hasattr(self, "get_single_selection") and callable(self.get_single_selection) and not sel:
-                    sel = self.get_single_selection() or sel
+
+                sel = self.selected_gaphics_tickers()
 
                 if sel:
                     env["ETF_TICKERS"] = ",".join(sel)
