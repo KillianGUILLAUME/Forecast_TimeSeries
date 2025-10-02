@@ -5,6 +5,12 @@ import os
 from types import SimpleNamespace
 from typing import Any, Final
 
+from mistralai import Mistral
+
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv())
+
+
 
 
 _SYSTEM_PROMPT: Final[str] = (
@@ -12,10 +18,33 @@ _SYSTEM_PROMPT: Final[str] = (
     "Provide clear, concise answers that reference established economic concepts "
     "when relevant."
 )
+MODEL_PRIMARY = "magistral-small-2509"
+MODEL_FALLBACK = "magistral-small-latest"
+
+
+def to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    
+    fragments: list[str] = []
+    try:
+        for part in content or []:
+            text = getattr(part, "text", None)
+            if text is None and isinstance(part, dict):
+                text = part.get("text")
+            if isinstance(text, str):
+                fragments.append(text)
+    except Exception:
+        pass
+
+    if fragments:
+        return "".join(fragments).strip()
+    return str(content).strip()
+    
 
 
 def fetch_economic_answer(question: str) -> str:
-    """Call the OpenAI API to obtain an answer to *question*.
+    """Call the MistralAI API to obtain an answer to *question*.
 
     Parameters
     ----------
@@ -30,148 +59,45 @@ def fetch_economic_answer(question: str) -> str:
 
     question = (question or "").strip()
     if not question:
-        return "Veuillez saisir une question économique avant d'envoyer la requête."
+        return "Veuillez saisir une question avant d'envoyer la requête."
 
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_KEY")
+
+    api_key = os.environ.get("MISTRAL_API_KEY")
     if not api_key:
         return (
             "Aucune clé OpenAI détectée. Configurez la variable d'environnement "
             "OPENAI_API_KEY avant de poser une question."
-        )
+            )
+    
 
+
+    client = Mistral(api_key=api_key)
+
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+    def _call(model_name: str) -> str:
+    # Appel Mistral (synchrone)
+        resp = client.chat.complete(
+            model=model_name,
+            messages=messages,
+            temperature=0.7,   # optionnel
+            max_tokens=600,     # optionnel
+
+        )
+        content = resp.choices[0].message.content
+        text = to_text(content)
+        return text or 'la réponse générée est vide.'
+    
     try:
-        from openai import OpenAI
+        return _call(MODEL_PRIMARY)
+    except mistral_models.MistralError as e2:
+        return(
+            "Impossible d'obtenir une réponse pour le moment "
+                f"(HTTP {getattr(e2, 'status_code', '?')}). "
+                "Merci de réessayer plus tard."
+        )
     except Exception:
-        OpenAI = None  # type: ignore[assignment]
-
-    try:
-        import openai
-    except Exception:  # pragma: no cover - dépend des installations utilisateur
-        return (
-            "Le module openai est introuvable. Installez le package 'openai' pour "
-            "utiliser cette fonctionnalité."
-        )
-        return (
-            "Le module openai est introuvable. Installez le package 'openai' pour "
-            "utiliser cette fonctionnalité."
-        )
-
-    client: Any | None = None
-
-    if OpenAI is not None:  # SDK >= 1.0
-        try:
-            client = OpenAI(api_key=api_key)
-        except Exception:  # pragma: no cover - dépend de l'installation utilisateur
-            client = None
-
-    if client is None:
-        openai.api_key = api_key
-        client = openai
-        if not hasattr(client, "chat") and hasattr(client, "ChatCompletion"):
-            client.chat = SimpleNamespace(  # type: ignore[attr-defined]
-                completions=SimpleNamespace(
-                    create=lambda **kwargs: client.ChatCompletion.create(**kwargs)  # type: ignore[attr-defined]
-                )
-            )
-
-    response = None
-
-    if hasattr(client, "responses"):
-        try:
-            response = client.responses.create(  # type: ignore[call-arg]
-                model="gpt-3.5-turbo",
-                input=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": question},
-                ],
-                temperature=0.3,
-                max_output_tokens=600,
-            )
-        except Exception:  # pragma: no cover - dépend des réponses réseau/API
-            response = None
-
-    if response is None and hasattr(client, "chat"):
-        chat = getattr(client, "chat")
-        completions = getattr(chat, "completions", None)
-        create = getattr(completions, "create", None)
-        if callable(create):
-            try:
-                response = create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": question},
-                    ],
-                    temperature=0.3,
-                    max_tokens=600,
-                )
-            except Exception:  # pragma: no cover - dépend des réponses réseau/API
-                response = None
-
-    if response is None:
-        return (
-            "Impossible d'accéder aux API de génération OpenAI avec le SDK installé. "
-            "Vérifiez que votre version du package 'openai' supporte l'endpoint "
-            "responses ou chat.completions."
-        )
-
-    answer = _extract_text_from_response(response)
-    if answer is None:
-        return answer or "La réponse générée est vide."
-
-
-
-def _extract_text_from_response(response: Any) -> str | None:
-    """Normalise les différents formats de réponse OpenAI en chaîne de caractères."""
-
-    if response is None:
-        return None
-
-    text = getattr(response, "output_text", None)
-    if isinstance(text, str) and text.strip():
-        return text.strip()
-
-    output = getattr(response, "output", None)
-    fragments: list[str] = []
-    if output:
-        for item in output:
-            content_list = getattr(item, "content", None) or []
-            for content in content_list:
-                segment = getattr(content, "text", None)
-                if hasattr(segment, "value"):
-                    segment = getattr(segment, "value")
-                if isinstance(segment, str):
-                    fragments.append(segment)
-    if fragments:
-        return "".join(fragments).strip()
-
-    data = response
-    if hasattr(response, "model_dump") and callable(getattr(response, "model_dump")):
-        try:
-            data = response.model_dump()
-        except Exception:  # pragma: no cover - dépend du SDK
-            data = response
-
-    if isinstance(data, dict):
-        try:
-            return str(
-                data["choices"][0]["message"]["content"]  # type: ignore[index]
-            ).strip()
-        except Exception:  # pragma: no cover - format inattendu
-            return None
-
-    if hasattr(response, "choices"):
-        choices = getattr(response, "choices")
-        if isinstance(choices, list) and choices:
-            message = choices[0]
-            if hasattr(message, "message"):
-                message = getattr(message, "message")
-            content = None
-            if isinstance(message, dict):
-                content = message.get("content")
-            else:
-                content = getattr(message, "content", None)
-            if isinstance(content, str):
-                return content.strip()
-
-    return None
+        return 'Une erreur inattendue est survenue. Merci de réessayer plus tard.'
+ 
