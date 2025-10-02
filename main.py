@@ -15,24 +15,21 @@ Architecture:
 from etf_collector import EuropeanETFCollector
 from etf_visualizer import ETFVisualizer
 
-from typing import List, Dict
 import sys
 import os, json
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
 
 
-from prediction_lstm_model import LSTMPredictor, LSTMPredictorProba
+
 from data_preprocessing import (
     LSTM_FEATURE_COLUMNS,
     TARGET_COLUMN,
     load_prepared_ticker,
+    build_lstm_features,
     prepare_lstm_training_datasets,
     resolve_training_universe,
 )
-
-
-from plot_prediction import plot_overlay
 
 
 
@@ -112,44 +109,34 @@ def print_progress(message: str, step: int = None, total_steps: int = None):
     sys.stdout.flush()  
 
 
-# def build_pipeline(df0: pd.DataFrame) -> pd.DataFrame:
-#     """Construit le df des indicateurs utilisé par le LSTM."""
+def build_pipeline(df0: pd.DataFrame) -> pd.DataFrame:
+    """Construit le df des indicateurs utilisé par le LSTM.
+        Utilisé pour les prédictions sur une série unique."""
 
-#     if not isinstance(df0, pd.DataFrame):
-#         raise TypeError("build_pipeline attend un DataFrame en entrée")
+    if not isinstance(df0, pd.DataFrame):
+        raise TypeError("build_pipeline attend un DataFrame en entrée")
 
-#     required_cols = ['adj_close', 'volume']
-#     missing = set(required_cols).difference(df0.columns)
-#     if missing:
-#         raise ValueError(f"Colonnes manquantes pour le pipeline: {sorted(missing)}")
+    feature = build_lstm_features(df0)
+    if feature.empty:
+        raise ValueError("Données insuffisantes pour construire les indicateurs.")
+    
+    missing = [col for col in LSTM_FEATURES if col not in feature.columns]
+    if missing:
+        raise ValueError(f"Colonnes manquantes après construction des indicateurs: {missing}")
 
-#     df_base = df0[list(required_cols)].copy()
-#     df_base = df_base.astype({c: float for c in required_cols if c in df_base})
-#     df_base['ret'] = np.log(df_base['adj_close']).diff()
+    return feature[LSTM_FEATURES]
 
-
-#     price = df_base['adj_close']
-#     df_base['SMA_5'] = price.rolling(window=5, min_periods=5).mean()
-#     df_base['SMA_50'] = price.rolling(window=50, min_periods=50).mean()
-
-#     delta = price.diff()
-#     gain = delta.clip(lower=0).rolling(window=14, min_periods=14).mean()
-#     loss = (-delta.clip(upper=0)).rolling(window=14, min_periods=14).mean()
-#     loss = loss.replace(0, np.nan)
-#     rs = gain / loss
-#     df_base['RSI_14'] = 100 - (100 / (1 + rs))
-#     df_base['RSI_14'] = df_base['RSI_14'].fillna(100)
-
-#     df_base['volume'] = np.log1p(df_base['volume'].clip(lower=0))
-
-#     df_features = df_base[LSTM_FEATURES].dropna()
-#     if df_features.empty:
-#         raise ValueError("Pipeline LSTM vide après préparation des indicateurs.")
-
-#     return df_features
+def build_features_for_ticker(collector: EuropeanETFCollector, ticker: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    df_to_pred = collector.get_one_frame(ticker)
+    if df_to_pred is None or df_to_pred.empty:
+        raise ValueError(f"Aucune donnée disponible pour le ticker {ticker}.")
+    dfp = build_pipeline(df_to_pred)
+    if dfp.empty:
+        raise ValueError(f"Données insuffisantes après préparation pour {ticker}.")
+    return df_to_pred, dfp
 
 
-LSTM_FEATURES = ['adj_close', 'volume', 'ret', 'SMA_5', 'SMA_50', 'RSI_14']
+LSTM_FEATURES = LSTM_FEATURE_COLUMNS
 TARGET_FEATURE = 'ret'
 
 
@@ -172,14 +159,7 @@ TARGET_FEATURE = 'ret'
 
 
 
-# def build_features_for_ticker(collector: EuropeanETFCollector, ticker: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-#     df_to_pred = collector.get_one_frame(ticker)
-#     if df_to_pred is None or df_to_pred.empty:
-#         raise ValueError(f"Aucune donnée disponible pour le ticker {ticker}.")
-#     dfp = build_pipeline(df_to_pred)
-#     if dfp.empty:
-#         raise ValueError(f"Données insuffisantes après préparation pour {ticker}.")
-#     return df_to_pred, dfp
+
 
 
 
@@ -338,125 +318,17 @@ def get_collector(
 
 
 
-def pipeline_predict(
-    df: pd.DataFrame,
-    feature: List[str],
-    target_feature: str,
-    window_size: int=10,
-    hidden_size: int=50,
-    num_layers: int=1,
-    lr: float=0.001,
-    epochs: int=100,
-    horizon: int=5
-) -> np.ndarray:
-    """
-    Pipeline de bout en bout pour la prédiction avec LSTM
-
-    Args:
-        df: DataFrame avec les données historiques
-        feature: Liste des colonnes à utiliser comme caractéristiques
-        window_size: Taille de la fenêtre temporelle
-        hidden_size: Nombre de neurones cachés dans LSTM
-        num_layers: Nombre de couches LSTM
-        lr: Taux d'apprentissage
-        epochs: Nombre d'époques d'entraînement
-        n_steps: Nombre de pas de temps à prédire
-
-    Returns:
-        np.ndarray avec les prédictions pour les n_steps futurs
-    """
-    print("🤖 Pipeline de prédiction LSTM")
-    predictor = LSTMPredictor(
-        feature=feature,
-        target_feature = target_feature,
-        window_size=window_size,
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-        horizon = horizon,
-        lr=lr,
-        epochs=epochs
-    )
-
-    print("🔧 Entraînement du modèle...")
-    predictor.fit(df)
-
-    print(f"🔮 Prédiction pour les {horizon} prochains pas...")
-    predictions = predictor.predict(df)
-
-    print("✅ Prédiction terminée.")
-    return predictions
-
-
-def pipeline_predict_proba_training(
-    df: List[pd.DataFrame],
-    feature: List[str],
-    target_feature: str,
-    window_size: int = 10,
-    hidden_size: int = 50,
-    num_layers: int = 1,
-    lr: float = 0.001,
-    epochs: int = 100,
-    horizon: int = 5,
-    evaluate: bool = True,
-    alpha: float = 0.05,
-    save_dir: str | None = "checkpoints/lstm_proba_latest"
-):
-    """
-    Pipeline de bout en bout pour la prédiction probabiliste avec LSTM (quantiles).
-
-    Args:
-        df: DataFrame avec les données historiques (doit contenir 'adj_close')
-        feature: Colonnes utilisées comme features (incluant celles nécessaires au modèle)
-        target_feature: Colonne cible (p.ex. 'ret' = log-returns)
-        window_size: Taille de fenêtre (T)
-        hidden_size: Taille cachée LSTM
-        num_layers: Nombre de couches LSTM
-        lr: Learning rate
-        epochs: Nombre d'époques d'entraînement
-        horizon: Nombre de pas futurs H
-        evaluate: Si True, calcule les métriques de coverage sur le set de test
-        alpha: Niveau pour l’intervalle (0.05 => 95%)
-
-    Returns:
-        - Si evaluate=False: np.ndarray (H, 3) avec colonnes [P_low, P_med, P_high]
-        - Si evaluate=True:  (preds, metrics) où
-              preds  = np.ndarray (H, 3)
-              metrics = dict de vecteurs (H,) {coverage, lower_tail, upper_tail, mpiwidth, interval_score}
-    """
-
-
-    print("🤖 Pipeline LSTM PROBA (quantiles)")
-    predictor = LSTMPredictorProba(
-        feature=feature,
-        target_feature=target_feature,
-        window_size=window_size,
-        hidden_size=hidden_size,
-        horizon=horizon,
-        num_layers=num_layers,
-        lr=lr,
-        epochs=epochs,
-    )
-
-    print("🔧 Entraînement du modèle proba...")
-    predictor.fit(df)
-
-    print(f'exemple de prédiction pour le ticker : {df["ticker"].iloc[0]}' if 'ticker' in df.columns else '')
-    print(f"🔮 Prédiction des quantiles pour les {horizon} prochains pas...")
-    preds = predictor.predict(df[0]) 
-    print("✅ Prédiction terminée.")
-
-    if save_dir:
-        predictor.save(save_dir)
-
-    if evaluate and hasattr(predictor, "X_test_scaled_torch") and len(predictor.X_test_scaled_torch) > 0:
-        print("📏 Évaluation du coverage sur l'échantillon test...")
-        metrics = predictor.evaluate_coverage_on_test(alpha=alpha)
-        return preds, metrics
-
-    return preds
-
-
 def run_lstm_prediction(collector : EuropeanETFCollector, ticker: str, hp: Dict, load_dir: str):
+
+    if not isinstance(load_dir, str):
+        raise TypeError(
+            f"'load_dir' doit être une chaîne de caractères, reçu {type(load_dir).__name__}."
+        )
+    if not isinstance(hp, dict):
+        raise TypeError(
+            f"'hp' doit être un dictionnaire d'hyperparamètres, reçu {type(hp).__name__}."
+        )
+
     if not load_dir:
         print("Pour l'action 'predict', le répertoire de chargement doit être spécifié via LSTM_LOAD_DIR.")
         sys.exit(1)
@@ -548,6 +420,7 @@ def run_lstm_training(
         lr=hp['lr'],
         epochs=hp['epochs'],
         horizon=hp['horizon'])
+    
 
     predictor.fit(datasets)
 
@@ -571,7 +444,7 @@ def run_graphics():
 
 
     if action == 'single' and len(sel_tickers or []) > 1:
-        sel_tickers = [sel_tickers[:1]]
+        sel_tickers = sel_tickers[:1]
 
     print(f"[DEBUG] action={action} tickers={sel_tickers}")
 
@@ -588,6 +461,8 @@ def run_graphics():
 
 
 def run_prediction():
+    from prediction_lstm_model import LSTMPredictorProba
+    from plot_prediction import plot_overlay
 
     action, raw_hp, ticker, load_dir, save_dir = get_lstm_from_env()
     hp = normalize_lstm_hp(raw_hp)

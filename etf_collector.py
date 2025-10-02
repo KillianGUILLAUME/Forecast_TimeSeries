@@ -40,14 +40,17 @@ def clean_yf_frame(df: pd.DataFrame) -> pd.DataFrame:
 class EuropeanETFCollector:
     def __init__(self, tickers: List[str] | None = None):
         # 3 ETF européens “classiques”
-        self.tickers = None if tickers is not None else ["VWCE.DE", "IWDA.AS", "EIMI.AS"]
+        self.tickers = list(tickers) if tickers is not None else ["VWCE.DE", "IWDA.AS", "EIMI.AS"]
         self.frames = None
 
     def get_tickers(self) -> List[str]:
         """
         Retourne la liste des tickers gérés
         """
-        return self.tickers if self.tickers else ["VWCE.DE", "IWDA.AS", "EIMI.AS"]
+        if self.tickers is None:
+            return ["VWCE.DE", "IWDA.AS", "EIMI.AS"]
+
+        return list(self.tickers)
     
 
     def frequence_annualization(self, idx : pd.DatetimeIndex) -> float:
@@ -223,23 +226,30 @@ class EuropeanETFCollector:
         renvoie un df particulier avec un ticker donné
         """
 
-        df0= None
-        if getattr(self, 'frames', None)  and getattr(self, 'tickers', None):
+        df0 = None
+        if getattr(self, 'frames', None) and getattr(self, 'tickers', None):
             if ticker in self.tickers:
                 idx = self.tickers.index(ticker)
                 df0 = self.frames[idx]
 
-        if df0 is  None:
+        if df0 is None:
             df0 = self.get_one_frame(ticker, period=period, interval=interval)
+
+        if df0 is None or df0.empty:
+            raise ValueError(f"Aucune donnée disponible pour le ticker {ticker}.")
+
 
         df_base = df0[['adj_close', 'volume']].copy()
         df_base['ret'] = np.log(df_base['adj_close']).diff()
 
-        if isinstance(ticker, str):
-            ticker = [ticker]
+        indicator_source = df0
 
-        if self.frames is None:
-            df_base = self.get_etf_frames(ticker=ticker, period=period, interval=interval)
-            df_indicator = self.get_indicator([df_base])
+        indicator_frames = self.get_indicator([indicator_source]) if indicator_source is not None else []
+        if not indicator_frames:
+            return df_base
 
-            df = pd.concat(df_base, df_indicator, ignore_index=False)
+        df_indicator = indicator_frames[0][['SMA_5', 'SMA_50', 'RSI_14']]
+
+        df = pd.concat(df_base, df_indicator, ignore_index=False)
+
+        return df
