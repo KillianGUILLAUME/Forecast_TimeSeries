@@ -190,7 +190,7 @@ def run_pipeline_for_graphics(
     # ÉTAPE 1: COLLECTE DES DONNÉES
     # ========================================
     print("📊 ÉTAPE 1: Collecte des données")
-    collector = EuropeanETFCollector(tickers=tickers)
+    collector = EuropeanETFCollector() if not tickers else EuropeanETFCollector(tickers=tickers)
 
     if not tickers:
         tickers = collector.get_tickers()
@@ -353,11 +353,13 @@ def run_lstm_prediction(collector : EuropeanETFCollector, ticker: str, hp: Dict,
         sys.exit(1)
 
     predictions = predictor.predict(dfp)
-    horizon = predictions.shape
+    predicted_horizon = len(predictions)
     expected_horizon = hp.get('horizon')
 
-    if expected_horizon and horizon != expected_horizon:
-        print(f"[WARNING] Le modèle prédit {horizon} pas, différent du paramètre attendu {expected_horizon}.")
+    if expected_horizon is not None and predicted_horizon != expected_horizon:
+        print(
+            f"Avertissement : l'horizon prédit ({predicted_horizon}) ne correspond pas à l'horizon attendu ({expected_horizon})."
+        )
 
     start = dfp.index[-1] + pd.offsets.BDay(1)
     idx_future = pd.bdate_range(start=start, periods=hp['horizon'])
@@ -495,7 +497,7 @@ def run_prediction():
 
     if action =='predict':
         try:
-            run_lstm_prediction(collector, ticker, load_dir, hp)
+            run_lstm_prediction(collector, ticker, hp, load_dir)
         except Exception as exc:
             print(f"Erreur lors de la prédiction LSTM: {exc}")
             sys.exit(1)

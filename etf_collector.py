@@ -79,12 +79,12 @@ class EuropeanETFCollector:
         columns = [date, ticker, open, high, low, close, adj_close, volume, dividends, stock_splits]
         """
 
-        tickers_to_fetch = self.get_tickers() if ticker is None else ticker
+        tickers_to_fetch = self.get_tickers() if ticker is None else [ticker]
         kept_tickers : List[str] = []
 
         # actions=True pour récupérer Dividends / Stock Splits
 
-        frames: List[pd.DataFrames] = []
+        frames: List[pd.DataFrame] = []
 
         for t in tickers_to_fetch:
             print(f"Téléchargement des données pour {t}...")
@@ -250,6 +250,6 @@ class EuropeanETFCollector:
 
         df_indicator = indicator_frames[0][['SMA_5', 'SMA_50', 'RSI_14']]
 
-        df = pd.concat(df_base, df_indicator, ignore_index=False)
+        df = pd.concat(df_base, df_indicator, axis=1)
 
         return df

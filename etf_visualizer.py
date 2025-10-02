@@ -43,6 +43,18 @@ class ETFVisualizer:
 
         # -- robustifier l'entrée --
         df = df.copy()
+
+        normalized_columns = {}
+        allowed_names = {
+            'date', 'open', 'high', 'low', 'close', 'adj_close', 'volume'
+        }
+        for col in df.columns:
+            normalized = col.strip().lower().replace(' ', '_')
+            if normalized in allowed_names and normalized not in df.columns:
+                normalized_columns[col] = normalized
+        if normalized_columns:
+            df = df.rename(columns=normalized_columns)
+
         # 1) avoir une colonne 'date'
         if 'date' not in df.columns:
             df = df.reset_index()
@@ -53,11 +65,11 @@ class ETFVisualizer:
         # 2) s'assurer d'avoir une colonne de prix
         if 'adj_close' not in df.columns:
             if 'close' in df.columns:
-                df = df.rename(columns={'close': 'adj_close'})
+                df['adj_close'] = df['close']
             elif len([c for c in df.columns if c not in ('date','volume')]) == 1:
                 # s'il n'y a qu'une seule série de prix, on la prend
                 only_col = [c for c in df.columns if c not in ('date','volume')][0]
-                df = df.rename(columns={only_col: 'adj_close'})
+                df['adj_close'] = df[only_col]
             else:
                 print(f"{ticker}: colonne de prix introuvable")
                 return
@@ -66,11 +78,13 @@ class ETFVisualizer:
         etf_name = self.etf_short_names.get(ticker, ticker)
 
         if 'high' in df.columns and 'low' in df.columns:
+            open_values = df['open'] if 'open' in df.columns else df['adj_close']
+            close_values = df['close'] if 'close' in df.columns else df['adj_close']
             fig_plotly = go.Figure(data=[go.Candlestick(x = df['date'],
-                            open = df['adj_close'],
+                            open = open_values,
                             high = df['high'],
                             low = df['low'],
-                            close = df['adj_close'])])
+                            close = close_values)])
             fig_plotly.update_layout(
                 title = f'{ticker} - {etf_name} Évolution du prix ajusté',
                 yaxis_title = 'Prix',
