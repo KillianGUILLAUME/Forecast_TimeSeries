@@ -1,16 +1,23 @@
 from __future__ import annotations
 
-import io
-from contextlib import redirect_stdout
-from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+from pathlib import Path
+import sys
+
 import streamlit as st
 
-import requests
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from streamlit_app_sections import init_session_state, render_etf_analysis_page, show_header
 
 
-st.title("Graph Analysis module")
+def main() -> None:
+    init_session_state()
+    show_header()
+    render_etf_analysis_page()
+
+
+if __name__ == "__main__":
+    main()

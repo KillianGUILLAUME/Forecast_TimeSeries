@@ -1,12 +1,7 @@
 [[pages]]
-name = "Home"
-icon = "🏠"
-path = "pages/page1.py"
-
-[[pages]]
 name = "Analyse ETF"
 icon = "📊"
-path = "pages/analyse_graphique_app.py"
+path = "pages/analyse_graph_app.py"
 
 [[pages]]
 name = "Prediction and Training"
@@ -14,6 +9,6 @@ icon = "🧠"
 path = "pages/prediction_app.py"
 
 [[pages]]
-name = "MagistrAssistant "
+name = "MagistrAssistant"
 icon = "⚙️"
 path = "pages/genai_app.py"
