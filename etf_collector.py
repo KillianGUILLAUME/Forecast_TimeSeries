@@ -40,7 +40,7 @@ def clean_yf_frame(df: pd.DataFrame) -> pd.DataFrame:
 class EuropeanETFCollector:
     def __init__(self, tickers: List[str] | None = None):
         # 3 ETF européens “classiques”
-        self.tickers = list(tickers) if tickers is not None else ["VWCE.DE", "IWDA.AS", "EIMI.AS"]
+        self.tickers = list(tickers) if tickers is not None else [ "SPY", "ISF.L", "CAC.PA", "EXS1.DE", "IAEX.AS", "1321.T", "XIC.TO", "2800.HK", "STW.AX", "510300.SS"]
         self.frames = None
 
     def get_tickers(self) -> List[str]:
@@ -48,7 +48,7 @@ class EuropeanETFCollector:
         Retourne la liste des tickers gérés
         """
         if self.tickers is None:
-            return ["VWCE.DE", "IWDA.AS", "EIMI.AS"]
+            return [ "SPY", "ISF.L", "CAC.PA", "EXS1.DE", "IAEX.AS", "1321.T", "XIC.TO", "2800.HK", "STW.AX", "510300.SS"]
 
         return list(self.tickers)
     

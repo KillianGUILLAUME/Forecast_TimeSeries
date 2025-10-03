@@ -7,12 +7,15 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-import matplotlib.pyplot as plt
+
 import pandas as pd
 import plotly.graph_objects as go
-import requests
-import seaborn as sns
+from plotly.subplots import make_subplots
 import streamlit as st
+
+import requests
+
+
 
 from data_preprocessing import (
     build_lstm_features,
@@ -133,26 +136,50 @@ def make_single_candlestick(df: pd.DataFrame, ticker: str, *, log_scale: bool) -
     high_values = work.get("high", work["adj_close"])
     low_values = work.get("low", work["adj_close"])
 
-    fig = go.Figure(
-        data=[
-            go.Candlestick(
-                x=work["date"],
-                open=open_values,
-                high=high_values,
-                low=low_values,
-                close=close_values,
-                name=ticker,
-            )
-        ]
+    has_volume = "volume" in work.columns and not work["volume"].isna().all()
+
+    fig = make_subplots(
+        rows=2 if has_volume else 1,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.7, 0.3] if has_volume else [1.0],
     )
+    fig.add_trace(
+        go.Candlestick(
+            x=work["date"],
+            open=open_values,
+            high=high_values,
+            low=low_values,
+            close=close_values,
+            name=ticker,
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.update_yaxes(title_text="Prix", row=1, col=1)
+
+    if has_volume:
+        fig.add_trace(
+            go.Bar(
+                x=work["date"],
+                y=work["volume"],
+                marker_color="#5C7CFA",
+                name="Volume",
+            ),
+            row=2,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Volume", row=2, col=1)
     fig.update_layout(
         title=f"{ticker} — Évolution du prix ajusté",
         xaxis_title="Date",
-        yaxis_title="Prix",
         template="plotly_dark",
+        showlegend=True,
     )
     if log_scale:
-        fig.update_yaxes(type="log")
+        fig.update_yaxes(type="log", row=1, col=1)
     return fig
 
 
@@ -161,9 +188,9 @@ def make_multi_performance(
     *,
     normalize: bool,
     log_scale: bool,
-) -> plt.Figure:
+) -> go.Figure:
     viz = ETFVisualizer()
-    fig, ax = plt.subplots(figsize=(12, 7))
+    fig = go.Figure()
 
     for ticker, frame in prices.items():
         work = ensure_price_column(frame)
@@ -175,44 +202,84 @@ def make_multi_performance(
         else:
             ylabel = "Prix"
         label = f"{ticker}"
-        ax.plot(work["date"], series, label=label, linewidth=2.0, color=viz._get_color(ticker))
+        fig.add_trace(
+            go.Scatter(
+                x=work["date"],
+                y=series,
+                mode="lines",
+                name=label,
+                line=dict(color=viz._get_color(ticker), width=2.0),
+            )
+        )
 
-    ax.set_title("Comparaison des ETF sélectionnés", fontweight="bold")
-    ax.set_xlabel("Date")
-    ax.set_ylabel(ylabel)
+        fig.add_trace(
+            go.Scatter(
+                x=work["date"],
+                y=series,
+                mode="lines",
+                name=label,
+                line=dict(color=viz._get_color(ticker), width=2.0),
+            )
+        )
+    fig.update_layout(
+        title="Comparaison des ETF sélectionnés",
+        xaxis_title="Date",
+        yaxis_title=ylabel,
+        template="plotly_dark",
+    )
     if log_scale:
-        ax.set_yscale("log")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper left")
-    fig.tight_layout()
+        fig.update_yaxes(type="log")
     return fig
 
 
-def make_returns_distribution(prices: Dict[str, pd.DataFrame]) -> plt.Figure:
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    axes = axes.flatten()
+def make_returns_distribution(prices: Dict[str, pd.DataFrame]) -> go.Figure:
     tickers = list(prices.keys())[:4]
+    titles = [f"{ticker} — Rendements quotidiens" for ticker in tickers]
+    while len(titles) < 4:
+        titles.append("")
+
+    fig = make_subplots(rows=2, cols=2, subplot_titles=titles, horizontal_spacing=0.1, vertical_spacing=0.15)
+
 
     for idx, ticker in enumerate(tickers):
         work = ensure_price_column(prices[ticker])
         returns = work["adj_close"].pct_change() * 100
-        axes[idx].hist(returns.dropna(), bins=40, color="#4ECDC4", edgecolor="black", alpha=0.7)
-        axes[idx].axvline(returns.mean(), color="red", linestyle="--", label="Moyenne")
-        axes[idx].set_title(f"{ticker} — Rendements quotidiens")
-        axes[idx].set_xlabel("Rendement (%)")
-        axes[idx].set_ylabel("Fréquence")
-        axes[idx].legend()
-        axes[idx].grid(True, alpha=0.3)
+        row = idx // 2 + 1
+        col = idx % 2 + 1
+        cleaned = returns.dropna()
+        fig.add_trace(
+            go.Histogram(
+                x=cleaned,
+                nbinsx=40,
+                marker=dict(color="#4ECDC4"),
+                name=ticker,
+                opacity=0.75,
+            ),
+            row=row,
+            col=col,
+        )
+        mean_value = cleaned.mean()
+        if pd.notna(mean_value):
+            fig.add_vline(
+                x=mean_value,
+                line=dict(color="red", dash="dash"),
+                annotation_text="Moyenne",
+                annotation_position="top right",
+                row=row,
+                col=col,
+            )
+        fig.update_xaxes(title_text="Rendement (%)", row=row, col=col)
+        fig.update_yaxes(title_text="Fréquence", row=row, col=col)
 
-    for idx in range(len(tickers), len(axes)):
-        axes[idx].axis("off")
-
-    fig.suptitle("Distribution des rendements quotidiens", fontweight="bold")
-    fig.tight_layout()
+    fig.update_layout(
+        title="Distribution des rendements quotidiens",
+        template="plotly_dark",
+        showlegend=False,
+    )
     return fig
 
 
-def make_correlation_matrix(prices: Dict[str, pd.DataFrame]) -> Optional[plt.Figure]:
+def make_correlation_matrix(prices: Dict[str, pd.DataFrame]) -> Optional[go.Figure]:
     returns = {}
     for ticker, frame in prices.items():
         work = ensure_price_column(frame)
@@ -226,14 +293,25 @@ def make_correlation_matrix(prices: Dict[str, pd.DataFrame]) -> Optional[plt.Fig
 
     returns_df = pd.DataFrame(returns).dropna()
     corr = returns_df.corr()
-    fig, ax = plt.subplots(figsize=(10, 6))
-    sns.heatmap(corr, annot=True, cmap="coolwarm", center=0, square=True, cbar_kws={"label": "Corrélation"}, ax=ax)
-    ax.set_title("Matrice de corrélation des rendements", fontweight="bold")
-    fig.tight_layout()
+    heatmap = go.Heatmap(
+        z=corr.values,
+        x=corr.columns,
+        y=corr.index,
+        colorscale="RdBu",
+        zmid=0,
+        colorbar=dict(title="Corrélation"),
+        text=corr.round(2).values,
+        texttemplate="%{text}",
+    )
+    fig = go.Figure(data=[heatmap])
+    fig.update_layout(
+        title="Matrice de corrélation des rendements",
+        template="plotly_dark",
+    )
     return fig
 
 
-def make_risk_return(prices: Dict[str, pd.DataFrame]) -> Optional[plt.Figure]:
+def make_risk_return(prices: Dict[str, pd.DataFrame]) -> Optional[go.Figure]:
     points: List[Tuple[str, float, float]] = []
     for ticker, frame in prices.items():
         work = ensure_price_column(frame)
@@ -249,20 +327,32 @@ def make_risk_return(prices: Dict[str, pd.DataFrame]) -> Optional[plt.Figure]:
     if not points:
         return None
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig = go.Figure()
+
     for ticker, ret, vol in points:
-        ax.scatter(vol, ret, s=100, alpha=0.7, label=ticker)
-        ax.annotate(ticker, (vol, ret), xytext=(5, 5), textcoords="offset points")
-    ax.set_xlabel("Volatilité annualisée (%)")
-    ax.set_ylabel("Rendement annualisé (%)")
-    ax.set_title("Profil risque/rendement", fontweight="bold")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
+        fig.add_trace(
+            go.Scatter(
+                x=[vol],
+                y=[ret],
+                mode="markers+text",
+                text=[ticker],
+                textposition="top center",
+                marker=dict(size=12, opacity=0.8),
+                name=ticker,
+            )
+        )
+
+    fig.update_layout(
+        title="Profil risque/rendement",
+        xaxis_title="Volatilité annualisée (%)",
+        yaxis_title="Rendement annualisé (%)",
+        template="plotly_dark",
+        showlegend=False,
+    )
     return fig
 
 
-def make_summary_dashboard(summary: pd.DataFrame) -> plt.Figure:
+def make_summary_dashboard(summary: pd.DataFrame) -> go.Figure:
     df = summary.copy()
     if "exchange" not in df.columns:
         df["exchange"] = df["ticker"].str.extract(r"(\.[A-Z]+)$").fillna("UNKNOWN")
@@ -278,44 +368,77 @@ def make_summary_dashboard(summary: pd.DataFrame) -> plt.Figure:
         }
         df["country"] = df["exchange"].map(mapping).fillna("Unknown")
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    ax1, ax2, ax3, ax4 = axes.flatten()
-
     country_returns = df.groupby("country")["total_return_%"].mean().sort_values(ascending=False)
-    ax1.bar(country_returns.index, country_returns.values, color="#5C7CFA")
-    ax1.set_title("Rendement moyen par pays", fontweight="bold")
-    ax1.set_ylabel("Rendement (%)")
-    ax1.tick_params(axis="x", rotation=45)
+    
+    fig = make_subplots(rows=2, cols=2, subplot_titles=(
+        "Rendement moyen par pays",
+        "Volatilité vs rendement",
+        "Volume moyen par bourse",
+        "Distribution des rendements",
+    ))
+
+    fig.add_trace(
+        go.Bar(x=country_returns.index, y=country_returns.values, marker_color="#5C7CFA"),
+        row=1,
+        col=1,
+    )
+    fig.update_yaxes(title_text="Rendement (%)", row=1, col=1)
 
     if {"annual_volatility_%", "total_return_%"}.issubset(df.columns):
-        ax2.scatter(df["annual_volatility_%"], df["total_return_%"], c="#4ECDC4", s=60, alpha=0.7)
-        ax2.set_xlabel("Volatilité annuelle (%)")
-        ax2.set_ylabel("Rendement total (%)")
-        ax2.set_title("Volatilité vs rendement", fontweight="bold")
-        ax2.grid(True, alpha=0.3)
-    else:
-        ax2.axis("off")
+        fig.add_trace(
+            go.Scatter(
+                x=df["annual_volatility_%"],
+                y=df["total_return_%"],
+                mode="markers",
+                marker=dict(color="#4ECDC4", size=8, opacity=0.7),
+            ),
+            row=1,
+            col=2,
+        )
+        fig.update_xaxes(title_text="Volatilité annuelle (%)", row=1, col=2)
+        fig.update_yaxes(title_text="Rendement total (%)", row=1, col=2)
 
     if "avg_volume" in df.columns:
         exchange_volume = df.groupby("exchange")["avg_volume"].mean().sort_values(ascending=False)
-        ax3.barh(exchange_volume.index, exchange_volume.values, color="#FF6B6B")
-        ax3.set_title("Volume moyen par bourse", fontweight="bold")
-        ax3.set_xlabel("Volume moyen")
-    else:
-        ax3.axis("off")
+        fig.add_trace(
+            go.Bar(
+                x=exchange_volume.values,
+                y=exchange_volume.index,
+                orientation="h",
+                marker_color="#FF6B6B",
+            ),
+            row=2,
+            col=1,
+        )
+        fig.update_xaxes(title_text="Volume moyen", row=2, col=1)
 
     if "total_return_%" in df.columns:
-        ax4.hist(df["total_return_%"], bins=15, color="#96CEB4", edgecolor="black", alpha=0.8)
-        ax4.axvline(df["total_return_%"].mean(), color="red", linestyle="--", label="Moyenne")
-        ax4.set_title("Distribution des rendements", fontweight="bold")
-        ax4.set_xlabel("Rendement (%)")
-        ax4.set_ylabel("Fréquence")
-        ax4.legend()
-    else:
-        ax4.axis("off")
+        fig.add_trace(
+            go.Histogram(
+                x=df["total_return_%"],
+                nbinsx=15,
+                marker=dict(color="#96CEB4"),
+                opacity=0.85,
+            ),
+            row=2,
+            col=2,
+        )
+        fig.add_vline(
+            x=df["total_return_%"].mean(),
+            line=dict(color="red", dash="dash"),
+            annotation_text="Moyenne",
+            annotation_position="top right",
+            row=2,
+            col=2,
+        )
+        fig.update_xaxes(title_text="Rendement (%)", row=2, col=2)
+        fig.update_yaxes(title_text="Fréquence", row=2, col=2)
 
-    fig.suptitle("Tableau de bord des ETF", fontweight="bold")
-    fig.tight_layout()
+    fig.update_layout(
+        title="Tableau de bord des ETF",
+        template="plotly_dark",
+        showlegend=False,
+    )
     return fig
 
 
@@ -325,40 +448,64 @@ def make_prediction_plot(
     *,
     ticker: str,
     history_window: int = 126,
-) -> plt.Figure:
+) -> go.Figure:
     work_hist = ensure_price_column(df_hist)
     work_hist = work_hist.sort_values("date").tail(history_window)
     if "date" not in work_hist.columns:
         work_hist = work_hist.reset_index().rename(columns={"index": "date"})
     work_hist["date"] = pd.to_datetime(work_hist["date"])
 
-    fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(work_hist["date"], work_hist["adj_close"], label="Historique", linewidth=2)
-
-    ax.fill_between(
-        df_pred.index,
-        df_pred["adj_close_P025"],
-        df_pred["adj_close_P975"],
-        color="#5C7CFA",
-        alpha=0.2,
-        label="Intervalle 95%",
-    )
-    ax.plot(
-        df_pred.index,
-        df_pred["adj_close_P50"],
-        linestyle="--",
-        color="#1E2749",
-        linewidth=2,
-        label="Médiane",
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=work_hist["date"],
+            y=work_hist["adj_close"],
+            mode="lines",
+            name="Historique",
+            line=dict(width=2, color="#1E88E5"),
+        )
     )
 
-    ax.axvline(work_hist["date"].iloc[-1], color="gray", linestyle=":", alpha=0.6)
-    ax.set_title(f"{ticker} — Prédiction LSTM", fontweight="bold")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Prix")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
+    fig.add_trace(
+        go.Scatter(
+            x=df_pred.index,
+            y=df_pred["adj_close_P025"],
+            mode="lines",
+            line=dict(width=0),
+            showlegend=False,
+            name="P025",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df_pred.index,
+            y=df_pred["adj_close_P975"],
+            mode="lines",
+            fill="tonexty",
+            fillcolor="rgba(92, 124, 250, 0.2)",
+            line=dict(width=0),
+            name="Intervalle 95%",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df_pred.index,
+            y=df_pred["adj_close_P50"],
+            mode="lines",
+            line=dict(color="#1E2749", dash="dash", width=2),
+            name="Médiane",
+        )
+    )
+
+    last_hist_date = work_hist["date"].iloc[-1]
+    fig.add_vline(x=last_hist_date, line=dict(color="gray", dash="dot"))
+
+    fig.update_layout(
+        title=f"{ticker} — LSTM Probability Prediction ",
+        xaxis_title="Date",
+        yaxis_title="Prix",
+        template="plotly_dark",
+    )
     return fig
 
 
@@ -380,7 +527,7 @@ def show_header() -> None:
         st.title("QuantIA — Analyse ETF & Prédictions LSTM")
         st.caption(
             "Interface web interactive propulsée par Streamlit pour explorer les ETF européens,"
-            " entraîner un modèle LSTM probabiliste et interroger l'assistant économique."
+            " entraîner un modèle LSTM probabiliste et interroger l'IA pour des questions économiques ou d'analyse financières."
         )
 
 
@@ -418,7 +565,7 @@ def render_visualisations(summary: pd.DataFrame, prices: Dict[str, pd.DataFrame]
         ]
     )
 
-    first_ticker = next(iter(prices))
+
     with viz_tab:
         target = st.selectbox("Choisir l'ETF à visualiser", list(prices.keys()), key="single_ticker")
         fig = make_single_candlestick(prices[target], target, log_scale=log_scale)
@@ -426,42 +573,92 @@ def render_visualisations(summary: pd.DataFrame, prices: Dict[str, pd.DataFrame]
 
     with compare_tab:
         fig = make_multi_performance(prices, normalize=True, log_scale=log_scale)
-        st.pyplot(fig)
-        plt.close(fig)
+        st.plotly_chart(fig, use_container_width=True)
 
     with dist_tab:
         fig = make_returns_distribution(prices)
-        st.pyplot(fig)
-        plt.close(fig)
+        st.plotly_chart(fig, use_container_width=True)
 
     with corr_tab:
         fig = make_correlation_matrix(prices)
         if fig is None:
             st.info("Pas assez d'ETF pour calculer une corrélation.")
         else:
-            st.pyplot(fig)
-            plt.close(fig)
+            st.plotly_chart(fig, use_container_width=True)
 
     with risk_tab:
         fig = make_risk_return(prices)
         if fig is None:
             st.info("Pas assez de données pour tracer le profil risque/rendement.")
         else:
-            st.pyplot(fig)
-            plt.close(fig)
+            st.plotly_chart(fig, use_container_width=True)
 
     with dash_tab:
         fig = make_summary_dashboard(summary)
-        st.pyplot(fig)
-        plt.close(fig)
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def render_lstm_prediction() -> None:
     st.subheader("Prédiction LSTM probabiliste")
     defaults = DEFAULT_LSTM_HP.copy()
 
+
+    st.markdown("### Recherche Yahoo Finance")
+    query = st.text_input(
+        "Rechercher un symbole ou un nom",
+        value=st.session_state.get("prediction_search_query", "VWCE"),
+        key="prediction_search_query",
+        help="Saisissez au moins deux caractères pour obtenir des suggestions Yahoo Finance.",
+    )
+    query = (query or "").strip()
+
+    selected_symbol = st.session_state.get("prediction_last_symbol", "VWCE.DE")
+    suggestions: List[Dict[str, str]] = []
+    if len(query) >= 2:
+        suggestions = yahoo_suggest(query, count=25)
+
+    if suggestions:
+        options_map: Dict[str, str] = {}
+        option_labels: List[str] = []
+        for item in suggestions:
+            symbol = (item.get("symbol") or "").upper()
+            if not symbol:
+                continue
+            name = item.get("name") or ""
+            exchange = item.get("exchange") or ""
+            label_parts = [symbol]
+            if name:
+                label_parts.append(f"— {name}")
+            if exchange:
+                label_parts.append(f"({exchange})")
+            label = " ".join(label_parts)
+            options_map[label] = symbol
+            option_labels.append(label)
+
+        if option_labels:
+            default_label = st.session_state.get("prediction_selected_label", option_labels[0])
+            if default_label not in options_map:
+                default_label = option_labels[0]
+            index = option_labels.index(default_label) if default_label in options_map else 0
+            selection_label = st.selectbox(
+                "Résultats Yahoo Finance",
+                option_labels,
+                index=index,
+                key="prediction_selected_label",
+            )
+            selected_symbol = options_map[selection_label]
+    elif query:
+        st.caption("Aucun résultat trouvé. Le symbole saisi sera utilisé tel quel.")
+        selected_symbol = query.upper()
+    else:
+        st.caption("Saisissez au moins deux caractères pour lancer la recherche Yahoo Finance.")
+
+    st.session_state["prediction_last_symbol"] = selected_symbol
+    st.write(f"Actif sélectionné : **{selected_symbol}**")
+
+
     with st.form("prediction_form"):
-        ticker = st.text_input("Ticker à prédire", value="VWCE.DE")
+        st.text_input("Ticker sélectionné", value=selected_symbol, disabled=True)
         load_dir = st.text_input("Répertoire du modèle sauvegardé", value="checkpoints")
         period = st.selectbox("Période de téléchargement", ["1y", "5y", "10y", "max"], index=1)
         interval = st.selectbox("Intervalle", ["1d", "1wk", "1mo"], index=0)
@@ -471,7 +668,7 @@ def render_lstm_prediction() -> None:
     if not submit:
         return
 
-    ticker = ticker.strip().upper()
+    ticker = selected_symbol.strip().upper()
     if not ticker:
         st.error("Veuillez renseigner un ticker valide.")
         return
@@ -484,21 +681,20 @@ def render_lstm_prediction() -> None:
 
     try:
         collector = EuropeanETFCollector(tickers=[ticker])
-        frames = collector.get_etf_frames(period=period, interval=interval)
+        df = collector.get_one_frame(period=period, interval=interval)
     except Exception as exc:  # pragma: no cover - runtime safety
         st.error(f"Erreur lors du téléchargement des données: {exc}")
         return
 
-    if not frames:
+    if not df:
         st.error("Aucune donnée téléchargée pour ce ticker.")
         return
 
-    raw_frame = frames[0]
-    if raw_frame is None or raw_frame.empty:
+    if df is None or df.empty:
         st.error("Données historiques vides pour ce ticker.")
         return
 
-    features = build_lstm_features(raw_frame)
+    features = build_lstm_features(df)
     if features.empty:
         st.error("Impossible de construire les indicateurs requis pour le modèle.")
         return
@@ -522,12 +718,11 @@ def render_lstm_prediction() -> None:
         index=future_index,
     )
 
-    work_hist = raw_frame.reset_index().rename(columns={"index": "date"})
+    work_hist = df.reset_index().rename(columns={"index": "date"})
     work_hist["date"] = pd.to_datetime(work_hist["date"])
 
     fig = make_prediction_plot(work_hist, preds_df, ticker=ticker)
-    st.pyplot(fig)
-    plt.close(fig)
+    st.plotly_chart(fig, use_container_width=True)
 
     st.write("Prévisions (premières lignes):")
     st.dataframe(preds_df.head())
@@ -551,7 +746,7 @@ def render_lstm_training() -> None:
         num_layers = st.number_input("Nombre de couches", min_value=1, max_value=6, value=int(defaults["num_layers"]))
         lr = st.number_input("Taux d'apprentissage", min_value=1e-5, max_value=1e-1, value=float(defaults["lr"]), format="%e")
         epochs = st.number_input("Nombre d'époques", min_value=10, max_value=2000, value=int(defaults["epochs"]))
-        horizon = st.number_input("Horizon de sortie", min_value=1, max_value=90, value=int(defaults["horizon"]))
+        horizon = st.number_input("Horizon de prédiction", min_value=1, max_value=90, value=int(defaults["horizon"]))
         submit = st.form_submit_button("Lancer l'entraînement")
 
     if not submit:
@@ -810,7 +1005,7 @@ def main() -> None:
         # -----------------------
         # 3) Paramètres & rendu
         # -----------------------
-        period = st.selectbox("Période", ["6mo", "1y", "5y", "10y", "max"], index=2)
+        period = st.selectbox("Période", ["6mo", "1y", "5y", "10y", "max"], index=4)
         interval = st.selectbox("Intervalle", ["1d", "1wk", "1mo"], index=0)
         use_max = st.checkbox("Ignorer la période et télécharger l'historique complet", value=True)
         log_scale = st.checkbox("Afficher l'échelle logarithmique", value=False)
