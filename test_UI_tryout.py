@@ -128,6 +128,8 @@ class ETFAnalysisGUI:
         self.max_var = tk.BooleanVar(value=True)
         self.log_plots_var = tk.BooleanVar(value=False)
 
+        self.cards_enabled = True
+
 
         # Polling pour vérifier l'état du processus
         self.after_id = None
@@ -141,334 +143,175 @@ class ETFAnalysisGUI:
         self.master.configure(bg="#0A0E27")
 
         
-        # Style
-        # style = ttk.Style()
-        # style.theme_use('clam')
-        
         # Configuration des couleurs
         self.colors = {
-            "background": "#0A0E27",
-            "divider": "#1E2749",
-            "button_bg": "#151B3B",
-            "button_hover": "#1E2749",
-            "button_disabled": "#1A1F33",
-            "button_border": "#2A3354",
-            "button_hover_border": "#5C7CFA",
-            "button_disabled_border": "#1F2540",
-            "icon": "#5C7CFA",
-            "icon_disabled": "#4C557A",
-            "text": "#FFFFFF",
-            "text_muted": "#8B92B0",
-            "text_disabled": "#6C7293",
-            "subtitle_disabled": "#5C6487"
+            "background": "#0C1A2C",
+            "surface": "#13243A",
+            "surface_hover": "#1B2F45",
+            "accent": "#F5DEB3",
+            "text_primary": "#F4F6FB",
+            "text_secondary": "#9BA8C4"
         }
+        self.master.configure(bg=self.colors["background"])
 
     def create_widgets(self):
-        """Initialise la page d'accueil et ses composants."""
-        self.configure_fonts()
-        self.create_main_interface()
+        main_frame = tk.Frame(self.master, bg=self.colors["background"])
+        main_frame.pack(fill="both", expand=True)
 
-    def configure_fonts(self):
-        """Prépare les polices utilisées dans l'interface principale."""
-        self.title_font = tkfont.Font(family="Helvetica", size=28, weight="bold")
-        self.subtitle_font = tkfont.Font(family="Helvetica", size=11)
-        self.button_font = tkfont.Font(family="Helvetica", size=12, weight="bold")
-        self.intro_font = tkfont.Font(family="Helvetica", size=10)
-        self.icon_font = tkfont.Font(size=48)
+        # Section titre (logo + tagline)
+        hero = tk.Frame(main_frame, bg=self.colors["background"])
+        hero.pack(pady=(80, 40))
 
-    def load_logo_image(self, size=(120, 120)):
-        """Charge le logo principal ou génère un substitut si nécessaire."""
-        logo_path = Path(__file__).parent / "logo_QuantIA.png"
-        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
-
-        if logo_path.exists():
-            try:
-                with Image.open(logo_path) as img:
-                    img = img.convert("RGBA")
-                    img = img.resize(size, resampling)
-                    return ImageTk.PhotoImage(img)
-            except Exception:
-                pass
-        return self.create_placeholder_logo(size)
-
-    def create_placeholder_logo(self, size=(120, 120)):
-        """Crée un logo hexagonal de substitution lorsque l'image est absente."""
-        width, height = size
-        img = Image.new("RGBA", size, color="#1a237e")
-        draw = ImageDraw.Draw(img)
-
-        def _scale(points):
-            return [
-                (
-                    int(round(x * width)),
-                    int(round(y * height))
-                )
-                for x, y in points
-            ]
-
-        outer = _scale([
-            (0.50, 0.08),
-            (0.92, 0.29),
-            (0.92, 0.71),
-            (0.50, 0.92),
-            (0.08, 0.71),
-            (0.08, 0.29),
-        ])
-        inner = _scale([
-            (0.50, 0.25),
-            (0.75, 0.39),
-            (0.75, 0.61),
-            (0.50, 0.75),
-            (0.25, 0.61),
-            (0.25, 0.39),
-        ])
-
-        draw.polygon(outer, fill="#3949ab", outline="#5c6bc0")
-        draw.polygon(inner, fill="#0A0E27", outline="#7986cb")
-
-        return ImageTk.PhotoImage(img)
-
-    def create_main_interface(self):
-        """Construit la page d'accueil moderne de navigation."""
-        self.master.configure(bg=self.colors["background"])
-        self.nav_buttons.clear()
-
-        header_frame = tk.Frame(self.master, bg=self.colors["background"], height=200)
-        header_frame.pack(fill="x", padx=40, pady=(40, 20))
-        header_frame.pack_propagate(False)
-
-        self.logo_img = self.load_logo_image()
-        logo_label = tk.Label(header_frame, image=self.logo_img, bg=self.colors["background"])
-        logo_label.pack(side="left", padx=(0, 30))
-
-        title_container = tk.Frame(header_frame, bg=self.colors["background"])
-        title_container.pack(side="left", fill="both", expand=True)
-
-        title = tk.Label(
-            title_container,
-            text="FINANCIAL ANALYTICS PLATFORM",
-            font=self.title_font,
-            fg=self.colors["text"],
-            bg=self.colors["background"],
-            anchor="w",
+        logo_label = tk.Label(
+            hero,
+            text="∑",
+            font=("Georgia", 56, "bold"),
+            fg=self.colors["accent"],
+            bg=self.colors["background"]
         )
-        title.pack(anchor="w", pady=(25, 5))
 
-        subtitle = tk.Label(
-            title_container,
-            text="Advanced Quantitative Analysis & Market Intelligence",
-            font=self.subtitle_font,
-            fg=self.colors["text_muted"],
-            bg=self.colors["background"],
-            anchor="w",
+        logo_label.pack()
+
+        title_label = tk.Label(
+            hero,
+            text="QuantIA",
+            font=("Georgia", 48, "bold"),
+            fg=self.colors["text_primary"],
+            bg=self.colors["background"]
         )
-        subtitle.pack(anchor="w")
+        title_label.pack(pady=(10, 12))
 
-        divider = tk.Frame(self.master, bg=self.colors["divider"], height=1)
-        divider.pack(fill="x", padx=40, pady=(0, 30))
-
-        intro_frame = tk.Frame(self.master, bg=self.colors["background"])
-        intro_frame.pack(fill="x", padx=40, pady=(0, 40))
-        intro_text = (
-    "Bonjour, voici une application qui vous permet de voir les actions et indices "
-    "de vos cours boursiers préférés. De plus, dans la section Prédiction, vous "
-    "pourrez retrouver nos prédictions pour certains ETF ou indicateurs économiques "
-    "comme l'inflation, le GDP et bien d'autres.\n"
-    "Amusez-vous bien !\n"
-    "Pour toute question, veuillez accéder au bouton « aide » en bas de la page. Merci.\n\n"
-    "Killian Guillaume, M1 Mathématiques Appliquées @ TSE | Intéressé par les processus "
-    "stochastiques, l'apprentissage automatique et les sciences de manière générale."
-)
-        intro_label = tk.Label(
-            intro_frame,
-            text=intro_text,
-            justify="left",
-            wraplength=1000  # ~ largeur utile de la fenêtre (800px - marges)
+        subtitle_label = tk.Label(
+            hero,
+            text="Une IA générative pour comprendre et analyser les marchés financiers.",
+            font=("Helvetica", 14),
+            fg=self.colors["text_secondary"],
+            bg=self.colors["background"]
         )
-        intro_label.pack(anchor="w")
 
-   
-        nav_frame = tk.Frame(self.master, bg=self.colors["background"])
-        nav_frame.pack(fill="both", expand=True, padx=40, pady=(0, 40))
+        subtitle_label.pack()
 
-        nav_frame.grid_columnconfigure(0, weight=1)
-        nav_frame.grid_columnconfigure(1, weight=1)
-        nav_frame.grid_rowconfigure(0, weight=1)
-        nav_frame.grid_rowconfigure(1, weight=1)
+        # Grille des actions principales
+        cards_frame = tk.Frame(main_frame, bg=self.colors["background"])
+        cards_frame.pack(fill="both", expand=True, padx=80, pady=(0, 80))
+        cards_frame.columnconfigure(0, weight=1)
+        cards_frame.columnconfigure(1, weight=1)
 
-        buttons = [
+        cards = [
             {
-                "key": "graphics",
-                "text": "GRAPHICS",
-                "subtitle": "Data Visualization & Charts",
-                "icon": "📊",
+                "title": "Marchés",
+                "description": "Comparer indices et secteurs en temps réel.",
+                "emoji": "📊",
                 "command": self.open_graphics_window,
-                "row": 0,
-                "col": 0,
             },
             {
-                "key": "prediction",
-                "text": "PREDICTION",
-                "subtitle": "Forecasting & ML Models",
-                "icon": "📈",
+                "title": "Modèles IA",
+                "description": "Configurer et entraîner nos modèles prédictifs.",
+                "emoji": "🤖",
                 "command": self.open_prediction_window,
-                "row": 0,
-                "col": 1,
             },
             {
-                "key": "economic",
-                "text": "ECONOMIC REVIEW",
-                "subtitle": "Market Analysis & Indicators",
-                "icon": "🌐",
+                "title": "Prédictions",
+                "description": "Explorer les analyses générées par l'IA économique.",
+                "emoji": "🔮",
                 "command": self.open_econ_window,
-                "row": 1,
-                "col": 0,
             },
             {
-                "key": "math",
-                "text": "FINANCIAL MATH",
-                "subtitle": "Quantitative Tools & Calculations",
-                "icon": "🧮",
-                "command": self.open_math_window,
-                "row": 1,
-                "col": 1,
+                "title": "Cours des actifs",
+                "description": "Suivre l'évolution d'un actif spécifique.",
+                "emoji": "💹",
+                "command": self.open_graphics_single_window,
             },
         ]
 
-        for btn_config in buttons:
-            self.create_nav_button(nav_frame, btn_config)
+        self.action_cards: list[tk.Frame] = []
 
-    def create_nav_button(self, parent, config: dict):
-        """Crée un bouton de navigation moderne."""
-        frame = tk.Frame(
-            parent,
-            bg=self.colors["button_bg"],
-            highlightbackground=self.colors["button_border"],
-            highlightcolor=self.colors["button_border"],
-            highlightthickness=1,
+        def make_card(parent, data, row, column):
+            card = tk.Frame(
+                parent,
+                bg=self.colors["surface"],
+                bd=0,
+                highlightthickness=0,
+                padx=32,
+                pady=32,
+            )
+            card.grid(row=row, column=column, padx=20, pady=20, sticky="nsew")
+            parent.rowconfigure(row, weight=1)
+            card.configure(cursor="hand2")
+            self.action_cards.append(card)
+
+            icon_lbl = tk.Label(
+                card,
+                text=data["emoji"],
+                font=("Helvetica", 36),
+                bg=self.colors["surface"],
+                fg=self.colors["accent"],
+            )
+            icon_lbl.pack(pady=(0, 18))
+
+            title_lbl = tk.Label(
+                card,
+                text=data["title"],
+                font=("Georgia", 20, "bold"),
+                bg=self.colors["surface"],
+                fg=self.colors["text_primary"],
+            )
+            title_lbl.pack()
+
+            desc_lbl = tk.Label(
+                card,
+                text=data["description"],
+                font=("Helvetica", 11),
+                wraplength=240,
+                justify="center",
+                bg=self.colors["surface"],
+                fg=self.colors["text_secondary"],
+            )
+            desc_lbl.pack(pady=(10, 0))
+
+            def on_enter(_):
+                card.configure(bg=self.colors["surface_hover"])
+                icon_lbl.configure(bg=self.colors["surface_hover"])
+                title_lbl.configure(bg=self.colors["surface_hover"])
+                desc_lbl.configure(bg=self.colors["surface_hover"])
+
+            def on_leave(_):
+                card.configure(bg=self.colors["surface"])
+                icon_lbl.configure(bg=self.colors["surface"])
+                title_lbl.configure(bg=self.colors["surface"])
+                desc_lbl.configure(bg=self.colors["surface"])
+
+            def trigger(_):
+                if self.cards_enabled:
+                    data["command"]()
+
+            for widget in (card, icon_lbl, title_lbl, desc_lbl):
+                widget.bind("<Enter>", on_enter)
+                widget.bind("<Leave>", on_leave)
+                widget.bind("<Button-1>", trigger)
+
+        for index, card_data in enumerate(cards):
+            make_card(cards_frame, card_data, index // 2, index % 2)
+
+        # Liens secondaires
+        extra_frame = tk.Frame(main_frame, bg=self.colors["background"])
+        extra_frame.pack(pady=(0, 40))
+
+        extra_btn = tk.Button(
+            extra_frame,
+            text="Outils mathématiques",
+            command=self.open_math_window,
+            font=("Helvetica", 11, "underline"),
+            fg=self.colors["text_secondary"],
+            bg=self.colors["background"],
+            activebackground=self.colors["background"],
+            activeforeground=self.colors["accent"],
             bd=0,
-        )
-        frame.grid(row=config["row"], column=config["col"], padx=10, pady=10, sticky="nsew")
-
-        frame.grid(row=config["row"], column=config["col"], padx=10, pady=10, sticky="nsew")
-
-        info = {
-            "key": config["key"],
-            "frame": frame,
-            "state": {"enabled": True, "hover": False},
-        }
-
-        icon_label = tk.Label(
-            frame,
-            text=f'{config["text"]}\n{config["subtitle"]}',
-            font=self.icon_font,
-            bg=self.colors["button_bg"],
-            fg=self.colors["icon"],
-            anchor="center",
-            relief="raised",
-        )
-        icon_label.pack(pady=(20, 15))
-
-        text_label = tk.Label(
-            frame,
-            text=config["text"],
-            font=self.button_font,
-            fg=self.colors["text"],
-            bg=self.colors["button_bg"],
-        )
-        text_label.pack(pady=(0, 5))
-
-        subtitle_label = tk.Label(
-            frame,
-            text=config["subtitle"],
-            font=self.intro_font,
-            fg=self.colors["text_muted"],
-            bg=self.colors["button_bg"],
+            highlightthickness=0,
+            cursor="hand2",
         )
 
-        subtitle_label.pack(pady=(0, 30))
-
-        info["labels"] = {
-            "icon": icon_label,
-            "text": text_label,
-            "subtitle": subtitle_label,
-        }
-        info["widgets"] = [frame, icon_label, text_label, subtitle_label]
-
-        def handle_click(event=None, command=config["command"], info=info):
-            if not info["state"]["enabled"]:
-                return
-            command()
-
-        def handle_enter(event=None, info=info):
-            self.on_button_hover(info, True)
-
-        def handle_leave(event=None, info=info):
-            self.on_button_hover(info, False)
-
-        for widget in info["widgets"]:
-            widget.bind("<Button-1>", handle_click)
-            widget.bind("<Enter>", handle_enter)
-            widget.bind("<Leave>", handle_leave)
-
-        self.nav_buttons[config["key"]] = info
-        self._refresh_nav_button_visuals(info)
-
-    def on_button_hover(self, info, entering):
-        """Gère l'effet de survol des boutons de navigation."""
-        if not info["state"]["enabled"]:
-            return
-
-        info["state"]["hover"] = entering
-        self._refresh_nav_button_visuals(info)
-
-    def _refresh_nav_button_visuals(self, info):
-        """Met à jour les couleurs et l'état visuel d'un bouton de navigation."""
-        state = info["state"]
-        if not state.get("enabled", True):
-            bg = self.colors["button_disabled"]
-            border = self.colors["button_disabled_border"]
-            icon_fg = self.colors["icon_disabled"]
-            text_fg = self.colors["text_disabled"]
-            subtitle_fg = self.colors["subtitle_disabled"]
-            cursor = "arrow"
-        elif state.get("hover"):
-            bg = self.colors["button_hover"]
-            border = self.colors["button_hover_border"]
-            icon_fg = self.colors["icon"]
-            text_fg = self.colors["text"]
-            subtitle_fg = self.colors["text_muted"]
-            cursor = "hand2"
-        else:
-            bg = self.colors["button_bg"]
-            border = self.colors["button_border"]
-            icon_fg = self.colors["icon"]
-            text_fg = self.colors["text"]
-            subtitle_fg = self.colors["text_muted"]
-            cursor = "hand2"
-
-        frame = info["frame"]
-        frame.configure(bg=bg, highlightbackground=border, highlightcolor=border, cursor=cursor)
-
-        for widget in info["widgets"]:
-            widget.configure(bg=bg, cursor=cursor)
-
-        info["labels"]["icon"].configure(fg=icon_fg)
-        info["labels"]["text"].configure(fg=text_fg)
-        info["labels"]["subtitle"].configure(fg=subtitle_fg)
-
-    def set_nav_button_state(self, key: str, enabled: bool):
-        """Active ou désactive un bouton de navigation."""
-        info = self.nav_buttons.get(key)
-        if not info:
-            return
-
-        info["state"]["enabled"] = enabled
-        if not enabled:
-            info["state"]["hover"] = False
-
-        self._refresh_nav_button_visuals(info)
-
+        extra_btn.pack()
 
 
 
@@ -1003,13 +846,16 @@ class ETFAnalysisGUI:
 
     def disable_buttons(self):
         """Désactive les boutons pendant l'exécution"""
-        self.set_nav_button_state("graphics", False)
-        self.set_nav_button_state("prediction", False)
+        self.cards_enabled = False
+        for card in getattr(self, "action_cards", []):
+            card.configure(cursor="watch")
 
     def enable_buttons(self):
         """Réactive les boutons après l'exécution"""
-        self.set_nav_button_state("graphics", True)
-        self.set_nav_button_state("prediction", True)
+        self.cards_enabled = True
+        for card in getattr(self, "action_cards", []):
+            card.configure(cursor="hand2")
+
 
 
     def lunch_graphics(self, parent, mode="graphics", show_save=True, show_close=True):
