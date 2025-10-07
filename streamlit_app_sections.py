@@ -618,9 +618,9 @@ def render_lstm_prediction() -> None:
     if len(query) >= 2:
         suggestions = yahoo_suggest(query, count=25)
 
+    options_map: Dict[str, str] = {}
+    option_labels: List[str] = []
     if suggestions:
-        options_map: Dict[str, str] = {}
-        option_labels: List[str] = []
         for item in suggestions:
             symbol = (item.get("symbol") or "").upper()
             if not symbol:
@@ -636,7 +636,7 @@ def render_lstm_prediction() -> None:
             options_map[label] = symbol
             option_labels.append(label)
 
-    if option_labels:
+    if suggestions:
         # 1) Déterminer **avant** le widget quel label doit être présélectionné
         ss_default = st.session_state.get("prediction_selected_label")
         if ss_default in options_map:
@@ -678,7 +678,17 @@ def render_lstm_prediction() -> None:
         load_dir = st.text_input("Répertoire du modèle sauvegardé", value="checkpoints")
         period = st.selectbox("Période de téléchargement", ["1y", "5y", "10y", "max"], index=1)
         interval = st.selectbox("Intervalle", ["1d", "1wk", "1mo"], index=0)
-        horizon = st.number_input("Horizon de prédiction (jours ouvrés)", min_value=1, max_value=90, value=int(defaults["horizon"]))
+        requested_horizon = st.number_input(
+            "Horizon de prédiction (jours ouvrés)",
+            min_value=1,
+            max_value=90,
+            value=int(defaults["horizon"]),
+            key="prediction_horizon",
+            help=(
+                "Le modèle fixe automatiquement son horizon de sortie. "
+                "La valeur du formulaire est synchronisée après chargement pour éviter tout écart."
+            ),
+        )
         submit = st.form_submit_button("Lancer la prédiction")
 
     if not submit:
@@ -688,18 +698,24 @@ def render_lstm_prediction() -> None:
     if not ticker:
         st.error("Veuillez renseigner un ticker valide.")
         return
-
+    requested_horizon = int(requested_horizon)
     try:
         predictor = LSTMPredictorProba.load(load_dir)
     except Exception as exc:  # pragma: no cover - runtime safety
         st.error(f"Impossible de charger le modèle: {exc}")
         return
+    effective_horizon = int(getattr(predictor, "output_h", requested_horizon))
+    if requested_horizon != effective_horizon:
+        st.info(
+            "L'horizon effectif du modèle chargé est de "
+            f"{effective_horizon} jours ouvrés. Le formulaire a été synchronisé."
+        )
+        requested_horizon = effective_horizon
 
     try:
         collector = EuropeanETFCollector(tickers=[ticker])
         df = collector.get_one_frame(ticker=ticker, period=period, interval=interval)
         df = download_price_history(ticker = ticker, period=period, interval=interval) if df is None else df
-        print(df.head())
     except Exception as exc:  # pragma: no cover - runtime safety
         st.error(f"Erreur lors du téléchargement des données: {exc}")
         return
@@ -719,14 +735,17 @@ def render_lstm_prediction() -> None:
         return
 
     try:
-        preds = predictor.predict(features)
+        preds = predictor.predict(features, asset=ticker)
     except Exception as exc:  # pragma: no cover - runtime safety
         st.error(f"Erreur lors de la prédiction: {exc}")
         return
     
-    print(preds)
+    effective_horizon = int(len(preds)) if preds is not None else requested_horizon
+    if effective_horizon <= 0:
+        st.error("Aucune prédiction n'a été générée par le modèle.")
+        return
+    future_index = compute_future_index(features.index[-1], horizon=effective_horizon)
 
-    future_index = compute_future_index(features.index[-1], horizon=horizon)
     preds_df = pd.DataFrame(
         {
         'adj_close_P025': preds[:, 0],
@@ -737,7 +756,6 @@ def render_lstm_prediction() -> None:
     )
 
     work_hist = df.reset_index().rename(columns={"index": "date"})
-    print(work_hist.head())
     work_hist["date"] = pd.to_datetime(work_hist["date"]) if "date" in work_hist.columns else pd.to_datetime(work_hist["Date"])
 
     fig = make_prediction_plot(work_hist, preds_df, ticker=ticker)
@@ -760,11 +778,11 @@ def render_lstm_training() -> None:
         save_dir = st.text_input("Répertoire de sauvegarde", value="checkpoints/experiment")
         period = st.selectbox("Période", ["1y", "5y", "10y", "max"], index=1)
         interval = st.selectbox("Intervalle", ["1d", "1wk", "1mo"], index=0)
-        window_size = st.number_input("Fenêtre temporelle", min_value=10, max_value=400, value=int(defaults["window_size"]))
-        hidden_size = st.number_input("Taille cachée", min_value=16, max_value=512, value=int(defaults["hidden_size"]))
+        window_size = st.number_input("Fenêtre temporelle", min_value=1, max_value=400, value=int(defaults["window_size"]))
+        hidden_size = st.number_input("Taille cachée", min_value=1, max_value=512, value=int(defaults["hidden_size"]))
         num_layers = st.number_input("Nombre de couches", min_value=1, max_value=6, value=int(defaults["num_layers"]))
         lr = st.number_input("Taux d'apprentissage", min_value=1e-5, max_value=1e-1, value=float(defaults["lr"]), format="%e")
-        epochs = st.number_input("Nombre d'époques", min_value=10, max_value=2000, value=int(defaults["epochs"]))
+        epochs = st.number_input("Nombre d'époques", min_value=1, max_value=2000, value=int(defaults["epochs"]))
         horizon = st.number_input("Horizon de prédiction", min_value=1, max_value=90, value=int(defaults["horizon"]))
         submit = st.form_submit_button("Lancer l'entraînement")
 
@@ -824,6 +842,8 @@ def render_lstm_training() -> None:
                 tickers=tickers,
                 period=period,
                 interval=interval,
+                plot_training=True,
+                plot_dir=save_dir,
             )
     except Exception as exc:  # pragma: no cover - runtime safety
         st.error(f"Erreur lors de l'entraînement: {exc}")

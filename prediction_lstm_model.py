@@ -4,13 +4,17 @@ import torch
 import torch.nn as nn
 import numpy as np
 import pandas as pd
+from pathlib import Path
+from sklearn.model_selection import TimeSeriesSplit
 
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.preprocessing import StandardScaler
 
-from typing import List, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union, Generator
 
 import matplotlib.pyplot as plt
 
+import copy
+import re
 import os, json, pickle
 from datetime import datetime
 
@@ -41,11 +45,36 @@ def make_sequence_multi_horizon(df: pd.DataFrame, feature: List[str], window_siz
     return torch.tensor(sequences), torch.tensor(targets)
 
 
-def split_data(sequences: torch.tensor, targets: torch.tensor, train_ratio: float=0.8) -> Tuple[torch.tensor, torch.tensor, torch.tensor, torch.tensor]:
-    train_size = int(len(sequences) * train_ratio)
-    X_train, y_train = sequences[:train_size], targets[:train_size]
-    X_test, y_test = sequences[train_size:], targets[train_size:]
-    return X_train, y_train, X_test, y_test
+def progressive_time_series_windows(
+        sequences: torch.Tensor,
+        targets: torch.Tensor,
+        n_splits: int,
+        test_size: Optional[int] = None
+) -> Generator[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, np.ndarray], None, None]:
+    """Parameters
+    ----------
+    sequences : torch.Tensor
+        Tensor de séquences (N, T, F)
+        targets : torch.Tensor (N,H)"""
+    
+    if len(sequences) == 0:
+        return
+    
+    try:
+        splitter = TimeSeriesSplit(n_splits=n_splits, test_size=test_size)
+    except ValueError as exc:
+        raise ValueError(f"Error initializing TimeSeriesSplit: {exc}")
+    
+    full_indices = np.arange(len(sequences))
+    for train_idx, val_idx in splitter.split(full_indices):
+        train_idx_t = torch.tensor(train_idx, dtype=torch.long)
+        val_idx_t = torch.tensor(val_idx, dtype=torch.long)
+
+        X_train, y_train = sequences.index_select(0, train_idx_t), targets.index_select(0, train_idx_t)
+        X_val, y_val = sequences.index_select(0, val_idx_t), targets.index_select(0, val_idx_t)
+        yield X_train, y_train, X_val, y_val, train_idx, val_idx
+
+    return X_train, y_train, X_val, y_val, train_idx, val_idx
 
 
 def coverage_metrics(y_true, q_low, q_med, q_high, alpha=0.05):
@@ -154,11 +183,16 @@ class LSTMModelProba(nn.Module):
     
 
 class LSTMPredictorProba:
-    def __init__(self, feature: List[str], target_feature :str, window_size: int=10, hidden_size: int=50, horizon : int = 10, num_layers: int=3, lr: float=0.001, epochs: int=1000):
+    def __init__(self, feature: List[str], target_feature :str, window_size: int=10, hidden_size: int=50, horizon : int = 10, num_layers: int=3, lr: float=0.001, epochs: int=1000,
+                 *, plot_training: bool = False, plot_dir: Optional[Union[str, os.PathLike[str]]] = None, walkforward_splits: int=5, walkforward_test_size: Optional[int]= None):
         unique_features = []
         for name in feature:
             if name not in unique_features:
                 unique_features.append(name)
+
+        if target_feature not in unique_features:
+            unique_features.append(target_feature)
+            print("on append ici")
 
         self.feature = unique_features
         self.target_feature = target_feature
@@ -170,65 +204,94 @@ class LSTMPredictorProba:
         self.lr = lr
         self.df_index_ = None
         self.epochs = epochs
-        self.scaler_x = MinMaxScaler()
+        self.scaler_x = StandardScaler()
         self.scaler_y = StandardScaler()
         self.model = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    def fit(self, frames: Union[pd.DataFrame, List[pd.DataFrame]]):
-
+        self.walkforward_splits = walkforward_splits
+        self.walkforward_test_size = walkforward_test_size
+        self.walkforward_metrics_: List[dict] = []
+        self.walkforward_summary_: Optional[dict] = None
+        self.training_curves_: Optional[dict] = None
+        self.best_split_index_: Optional[int] = None
+        self.X_test_scaled_torch: Optional[torch.Tensor] = None
+        self.y_test_last: Optional[torch.Tensor] = None
+        self.plot_training = plot_training
+        self.plot_dir = Path(plot_dir) if plot_dir is not None else None
+    def fit(self, frames: Union[pd.DataFrame,Iterable[Union[pd.DataFrame, Tuple[str, pd.DataFrame]]],]):
 
         if isinstance(frames, pd.DataFrame):
             iterable =[frames]
+
         else:
             iterable = list(frames)
 
 
-        seq_list, targ_list, indices = [], [], []
+        seq_list: List[torch.Tensor] = []
+        targ_list: List[torch.Tensor] = []
+        indices: List[pd.Index] = []
+
+        clean_frames: List[pd.DataFrame] = []
+        print(frames[0][1].head())
 
         for frame in iterable:
             if frame is None or len(frame) == 0:
                 continue 
-            if frame.columns.duplicated().any():
-                frame = frame.loc[:, ~frame.columns.duplicated()].copy() # remove duplicated columns
-
-            missing = [col for col in self.feature if col not in frame.columns]
+            if frame[1].columns.duplicated().any():
+                frame[1] = frame[1].loc[:, ~frame.columns.duplicated()].copy() # remove duplicated columns
+                print(frame[1].head())
+            missing = [col for col in self.feature if col not in frame[1].columns]
             if missing:
-                print(f"[WARNING] Frame missing features {missing}, skipping")
+                print(f" missing columns: {missing}. Skipping.")
                 continue
-        for frame in iterable:
+
+            if self.target_feature not in frame[1].columns:
+                print(
+                    f"[WARNING] Frame missing target '{self.target_feature}', skipping"
+                )
+                continue
+
+            clean_frames.append(frame[1].copy())
+
+        if not clean_frames:
+            raise ValueError(
+                "Aucun jeu de données exploitable après validation des caractéristiques."
+            )
+        
+
+
+        for frame in clean_frames:
             s, t = make_sequence_multi_horizon(
-                frame, feature=self.feature, target_feature=self.target_feature,
-                window_size=self.window_size, H=self.output_h
+                frame,
+                feature=self.feature,
+                target_feature=self.target_feature,
+                window_size=self.window_size,
+                H=self.output_h,
             )
             if len(s) > 0:
                 seq_list.append(s)
                 targ_list.append(t)
                 indices.append(frame.index)
-
         if not seq_list:
             raise ValueError("Aucune séquence générée (données insuffisantes).")
 
         sequences = torch.cat(seq_list, dim=0)
-        targets   = torch.cat(targ_list, dim=0)
+        targets  = torch.cat(targ_list, dim=0)
 
-        # --- Aperçu du dataset construit ---
+        """Overlook of constructed dataset"""
+
         N, T, F = sequences.shape
         H = targets.shape[1]
         print(f"\n[PREVIEW] sequences: N={N}, T={T}, F={F} | targets: H={H}")
         print(f"Features utilisées (ordre): {self.feature}")
-
+        print("Répartition des fenêtres par actif:")
         # 1) stats globales par feature (sur toutes les séquences et toutes les étapes)
         with torch.no_grad():
             feat_mean = sequences.float().mean(dim=(0, 1)).cpu().numpy()
-            feat_std  = sequences.float().std(dim=(0, 1)).cpu().numpy()
+            feat_std = sequences.float().std(dim=(0, 1)).cpu().numpy()
         print("\n[Stats globales] mean/std par feature:")
-        for j, name in enumerate(self.feature):
-            print(f" - {name:<10} mean={feat_mean[j]:.6f}  std={feat_std[j]:.6f}")
-
-        # 2) première fenêtre (T x F) sous forme de DataFrame lisible
         try:
-            seq0 = sequences[0].detach().cpu().numpy()   # (T, F)
+            seq0 = sequences[0].detach().cpu().numpy()  # (T, F)
             df_seq0 = pd.DataFrame(seq0, columns=self.feature)
             print("\n[Window #0] premières lignes de la fenêtre (T x F):")
             with pd.option_context("display.max_columns", None, "display.width", 160):
@@ -244,171 +307,310 @@ class LSTMPredictorProba:
         except Exception as e:
             print(f"[WARN] impossible d'afficher la première cible: {e}")
 
+        # --- Création des splits walk-forward -----------------------------
 
-        # sequences, targets = make_sequence_multi_horizon(df, feature = self.feature, target_feature=self.target_feature, window_size=self.window_size, H =self.output_h)
-        X_train, y_train, X_test, y_test = split_data(sequences, targets)
+        try:
+            splits = list(
+                progressive_time_series_windows(
+                    sequences,
+                    targets,
+                    n_splits=self.walkforward_splits,
+                    test_size=self.walkforward_test_size,
+                )
+            )
+        except ValueError as exc:
+            raise ValueError("Impossible de générer les splits walk-forward: vérifie la taille de l'échantillon.") from exc
 
-
+        if not splits:
+            raise ValueError("Impossible de créer des splits walk-forward (données insuffisantes).")
 
         self.df_index_ = indices[-1] if indices else None
+        self.walkforward_metrics_.clear()
+
+        best_artifacts = None
+        global_best_loss = float("inf")
 
 
-        Ntr, T, F = X_train.shape
-        Xtr2d = X_train.detach().cpu().numpy().reshape(-1, F)
-        Xte2d = X_test.detach().cpu().numpy().reshape(-1, F) if len(X_test) else np.empty((0, F), np.float32)
+        for split_idx, (X_train, y_train, X_val, y_val, train_idx, val_idx) in enumerate(splits, start=1):
+            train_range = (int(train_idx[0]), int(train_idx[-1])) if len(train_idx) else (None, None)
+            val_range = (int(val_idx[0]), int(val_idx[-1])) if len(val_idx) else (None, None)
+            print(f"\n[Split {split_idx}/{len(splits)}] train={train_range} | val={val_range}")
+
+            Ntr, T, F = X_train.shape
+            Nval = X_val.shape[0]
+
+            if Ntr == 0 or Nval == 0:
+                print("[WARNING] Split ignoré faute d'observations suffisantes.")
+                continue
 
 
-        X_train_scaled2d = self.scaler_x.fit_transform(Xtr2d.reshape(-1, len(self.feature))).astype(np.float32)
-        X_test_scaled2d = self.scaler_x.transform(Xte2d.reshape(-1, len(self.feature))).astype(np.float32) if len(X_test) else Xte2d
+            scaler_x = StandardScaler()
+            scaler_y = StandardScaler()
+
+            X_train_np = X_train.detach().cpu().numpy().reshape(-1, F)
+            X_val_np = X_val.detach().cpu().numpy().reshape(-1, F)
+            scaler_x.fit(X_train_np)
+            X_train_scaled = scaler_x.fit_transform(X_train_np).astype(np.float32).reshape(Ntr, T, F)
+            X_val_scaled = scaler_x.transform(X_val_np).astype(np.float32).reshape(Nval, T, F)
+
+            y_train_np = y_train.detach().cpu().numpy()
+            y_val_np = y_val.detach().cpu().numpy()
+            scaler_y.fit(y_train_np)
+            y_train_scaled = scaler_y.fit_transform(y_train_np).astype(np.float32)
+            y_val_scaled = scaler_y.transform(y_val_np).astype(np.float32)
+
+            X_train_scaled_torch = torch.from_numpy(X_train_scaled)
+            y_train_scaled_torch = torch.from_numpy(y_train_scaled)
+            X_val_scaled_torch = torch.from_numpy(X_val_scaled)
+            y_val_scaled_torch = torch.from_numpy(y_val_scaled)
 
 
+            train_ds = torch.utils.data.TensorDataset(X_train_scaled_torch.float(), y_train_scaled_torch.float())
+            val_ds = torch.utils.data.TensorDataset(X_val_scaled_torch.float(), y_val_scaled_torch.float())
 
-        X_train_scaled_torch = torch.from_numpy(X_train_scaled2d.reshape(Ntr, T, F))
-        if len(X_test):
-            X_test_scaled_torch = torch.from_numpy(X_test_scaled2d.reshape(X_test.shape[0], T, F))
-        else:
-            X_test_scaled_torch = X_test
-
-
-        y_train_scaled = self.scaler_y.fit_transform(y_train.numpy()).astype(np.float32)
-        y_train_last = torch.from_numpy(y_train_scaled)
-
-
-        self.X_test_scaled_torch = X_test_scaled_torch
-        if len(X_test):
-            y_test_scaled = self.scaler_y.transform(y_test.numpy()).astype(np.float32)
-            self.y_test_last = torch.from_numpy(y_test_scaled)
-        else:
-            self.y_test_last = y_test
-
-        if len(self.X_test_scaled_torch) >0:
-            val_ds = torch.utils.data.TensorDataset(self.X_test_scaled_torch.float(), self.y_test_last)
+            train_dl = torch.utils.data.DataLoader(train_ds, batch_size=32, shuffle=True)
             val_dl = torch.utils.data.DataLoader(val_ds, batch_size=32, shuffle=False)
-        else:
-            val_dl = None
-
-        assert X_train_scaled_torch.shape[0] == y_train_last.shape[0], f"Shape mismatch: {X_train_scaled_torch.shape[0]} vs {y_train_last.shape[0]}"
 
 
-        train_ds = torch.utils.data.TensorDataset(X_train_scaled_torch.float(), y_train_last)
-        train_dl = torch.utils.data.DataLoader(train_ds, batch_size=32, shuffle=True)
-
-        print(train_dl.dataset, train_dl.dataset.tensors[0].shape, train_dl.dataset.tensors[1].shape)
-         
-        """         Modele LSTM proba         """
-
-        self.model = LSTMModelProba(
-                input_size=len(self.feature),
-                hidden_size=self.hidden_size,
-                horizon=self.output_h,
-                quantiles=self.quantiles,
-                num_layers=self.num_layers
-            ).to(self.device)
-        
-        def criterion(pred, targ):
-            return quantile_loss(pred, targ, quantiles=self.quantiles)
-        
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=1e-5)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=.5, patience=30)
-
-        best_loss, patience, bad = float('inf'), 150, 0
-
-        lr_to_plot, loss_plot, val_plot = np.zeros(self.epochs), np.zeros(self.epochs), np.zeros(self.epochs)
 
 
-        """        Entrainement du modele          """
-
-        print("Starting training...")
-        for epoch in range(1, self.epochs +1):
-            self.model.train()
-            running=0.0
-            for seqs, targs in train_dl:
-                seqs, targs = seqs.to(self.device).float(), targs.to(self.device).float()
-                optimizer.zero_grad()
-                outputs = self.model(seqs)
-                loss = criterion(outputs, targs)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                optimizer.step()
-                running+=loss.item()*seqs.size(0)
+            model = LSTMModelProba(
+                    input_size=len(self.feature),
+                    hidden_size=self.hidden_size,
+                    horizon=self.output_h,
+                    quantiles=self.quantiles,
+                    num_layers=self.num_layers,
+                ).to(self.device)
             
+            def criterion(pred, targ):
+                return quantile_loss(pred, targ, quantiles=self.quantiles)
+            
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.lr, weight_decay=1e-5)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=.5, patience=30)
 
-            train_loss = running/len(train_ds)
+            best_val_loss_split, patience, bad = float('inf'), 150, 0
+            best_state_split = {k: v.cpu() for k, v in model.state_dict().items()}
+            
+            lr_to_plot, loss_plot, val_plot = np.zeros(self.epochs), np.zeros(self.epochs), np.zeros(self.epochs)
 
-            if val_dl is not None:
-                self.model.eval()
+
+            """        Entrainement du modele          """
+
+            print("Starting training...")
+            for epoch in range(1, self.epochs +1):
+                model.train()
+                running=0.0
+                for seqs, targs in train_dl:
+                    seqs, targs = seqs.to(self.device).float(), targs.to(self.device).float()
+                    optimizer.zero_grad()
+                    outputs = model(seqs)
+                    loss = criterion(outputs, targs)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    running+=loss.item()*seqs.size(0)
+                
+
+                train_loss = running/len(train_ds)
+                model.eval()
                 v_running=0.0
+
                 with torch.no_grad():
                     for vseqs, vtargs in val_dl:
                         vseqs, vtargs = vseqs.to(self.device).float(), vtargs.to(self.device).float()
-                        voutputs = self.model(vseqs)
+                        voutputs = model(vseqs)
                         loss = criterion(voutputs, vtargs)
                         v_running+=loss.item()*vseqs.size(0)
                 val_loss = v_running/len(val_ds)
-            else:
-                val_loss = float('nan')
 
+                scheduler.step(val_loss)
 
-            scheduler.step(train_loss)
+                if val_loss < best_val_loss_split:
+                    best_val_loss_split = val_loss
+                    bad = 0
+                    best_state_split = {k: v.cpu() for k,v in model.state_dict().items()}
+                else:
+                    bad +=1
+                    if bad >= patience:
+                        print(f"Early stopping at epoch {epoch}")
+                        break
 
-            monitor = val_loss if val_dl is not None else train_loss
-            if monitor < best_loss:
-                best_loss = monitor
-                bad = 0
-                best_state = {k: v.cpu() for k,v in self.model.state_dict().items()}
-            else:
-                bad +=1
-                if bad >= patience:
-                    print(f"Early stopping at epoch {epoch}")
-                    break
-
+                
+                lr_to_plot[epoch-1]=optimizer.param_groups[0]['lr']
+                loss_plot[epoch-1]=train_loss
+                val_plot[epoch-1]=val_loss
+                if (epoch+1) % 25 == 0:
+                    print(f'Epoch [{epoch+1}/{self.epochs}]| Train: {train_loss:.4f} | val: {val_loss:.4f} | LR: {optimizer.param_groups[0]["lr"]:.6f}')
             
-            lr_to_plot[epoch-1]=optimizer.param_groups[0]['lr']
-            loss_plot[epoch-1]=loss.item()
-            val_plot[epoch-1]=val_loss
-            if (epoch+1) % 25 == 0:
-                print(f'Epoch [{epoch+1}/{self.epochs}]| Train: {train_loss:.4f} | val: {val_loss:.4f} | LR: {optimizer.param_groups[0]["lr"]:.6f}')
+            model.load_state_dict(best_state_split)
+
+            model.eval()
+            preds_scaled_list, y_scaled_list = [], []
+            with torch.no_grad():
+                for xb, yb in val_dl:
+                    qb = model(xb.to(self.device).float()).cpu().numpy()
+                    preds_scaled_list.append(qb)
+                    y_scaled_list.append(yb.numpy())
+
+            q_scaled = np.concatenate(preds_scaled_list, axis=0)
+            y_scaled = np.concatenate(y_scaled_list, axis=0)
+            q = inverse_transform_quantiles(q_scaled, scaler_y)
+            y = scaler_y.inverse_transform(y_scaled)
+
+            metrics = coverage_metrics(
+                y_true=y,
+                q_low=q[:, :, 0],
+                q_med=q[:, :, 1],
+                q_high=q[:, :, 2],
+            )        
+
+
+            """        Visualisation de l'entrainement  """
+
+            history_entry = {
+                "split": split_idx,
+                "train_range": train_range,
+                "val_range": val_range,
+                "val_loss": float(best_val_loss_split),
+                "coverage": metrics["coverage"].tolist(),
+                "winkler": metrics["interval_score"].tolist(),
+                "mpiwidth": metrics["mpiwidth"].tolist(),
+            }
+            self.walkforward_metrics_.append(history_entry)
+
+            print(
+                "Validation coverage:",
+                " ".join(f"{c:.3f}" for c in metrics["coverage"]),
+            )
+            print(
+                "Validation Winkler score:",
+                " ".join(f"{c:.3f}" for c in metrics["interval_score"]),
+            )
+
+            if best_val_loss_split < global_best_loss:
+                global_best_loss = best_val_loss_split
+                best_artifacts = {
+                    "state": copy.deepcopy(best_state_split),
+                    "scaler_x": copy.deepcopy(scaler_x),
+                    "scaler_y": copy.deepcopy(scaler_y),
+                    "X_val_scaled": X_val_scaled_torch.clone(),
+                    "y_val_scaled": y_val_scaled_torch.clone(),
+                    "lr_history": lr_to_plot.copy(),
+                    "train_history": loss_plot.copy(),
+                    "val_history": val_plot.copy(),
+                    "split": split_idx,
+                }
+
+        if best_artifacts is None:
+            raise ValueError("Aucun modèle valide n'a été entraîné lors du walk-forward.")
         
-        self.model.load_state_dict(best_state)
+        self.model = LSTMModelProba(
+            input_size=len(self.feature),
+            hidden_size=self.hidden_size,
+            horizon=self.output_h,
+            quantiles=self.quantiles,
+            num_layers=self.num_layers,
+        ).to(self.device)
+        self.model.load_state_dict(best_artifacts["state"])
+        self.model.eval()
+
+        self.scaler_x = best_artifacts["scaler_x"]
+        self.scaler_y = best_artifacts["scaler_y"]
+        self.X_test_scaled_torch = best_artifacts["X_val_scaled"]
+        self.y_test_last = best_artifacts["y_val_scaled"]
+        self.best_split_index_ = best_artifacts["split"]
+
+        self.training_curves_ = {
+            "lr": best_artifacts["lr_history"],
+            "train_loss": best_artifacts["train_history"],
+            "val_loss": best_artifacts["val_history"],
+            "split": best_artifacts["split"],
+        }
+
+        if self.walkforward_metrics_:
+            val_losses = np.array([m["val_loss"] for m in self.walkforward_metrics_], dtype=np.float64)
+            coverage_mat = np.array([m["coverage"] for m in self.walkforward_metrics_], dtype=np.float64)
+            winkler_mat = np.array([m["winkler"] for m in self.walkforward_metrics_], dtype=np.float64)
+            mpiwidth_mat = np.array([m["mpiwidth"] for m in self.walkforward_metrics_], dtype=np.float64)
+
+            self.walkforward_summary_ = {
+                "splits": len(self.walkforward_metrics_),
+                "best_split": int(self.best_split_index_),
+                "mean_val_loss": float(np.nanmean(val_losses)),
+                "std_val_loss": float(np.nanstd(val_losses)) if len(val_losses) > 1 else 0.0,
+                "mean_coverage": coverage_mat.mean(axis=0).tolist(),
+                "mean_winkler": winkler_mat.mean(axis=0).tolist(),
+                "mean_mpiwidth": mpiwidth_mat.mean(axis=0).tolist(),
+            }
+        else:
+            self.walkforward_summary_ = None
+
+        if self.training_curves_ and self.training_curves_["lr"]:
+            lr_hist = np.array(self.training_curves_["lr"], dtype=np.float64)
+            train_hist = np.array(self.training_curves_["train_loss"], dtype=np.float64)
+            val_hist = np.array(self.training_curves_["val_loss"], dtype=np.float64)
+
+            plt.figure(figsize=(12, 8))
+
+            plt.subplot(2, 1, 1)
+            plt.plot(lr_hist)
+            plt.xlabel('Epochs')
+            plt.ylabel('Learning Rate')
+            plt.title('Learning Rate Schedule (best split)')
+            plt.yscale('log')
+
+            plt.subplot(2, 1, 2)
+            plt.plot(train_hist, label='Train Loss')
+            plt.plot(val_hist, label='Val Loss')
+            plt.xlabel('Epochs')
+            plt.ylabel('Loss')
+            plt.title('Losses (best split)')
+            plt.yscale('log')
+
+            plt.tight_layout()
+            plt.legend()
+            plt.show()
 
 
-        """        Visualisation de l'entrainement  """
-
-
-        plt.figure(figsize=(12, 8))
-
-        # First subplot for learning rate
-        plt.subplot(2, 1, 1)
-        plt.plot(lr_to_plot)
-        plt.xlabel('Epochs')
-        plt.ylabel('Learning Rate')
-        plt.title('Learning Rate Schedule')
-        plt.yscale('log')
-
-        # Second subplot for loss
-        plt.subplot(2, 1, 2)
-        plt.plot(loss_plot, label='Train Loss')
-        plt.plot(val_plot, label='Val Loss')
-        plt.xlabel('Epochs')
-        
-        plt.ylabel('training Loss and val Loss')
-        plt.title('Losses')
-        plt.yscale('log')
-        
-        plt.tight_layout()
-        plt.legend()
-        plt.show()
-
-
-
-    def predict(self, df: pd.DataFrame) -> np.ndarray:
+    def predict(self, df: pd.DataFrame, asset: Optional[str] = None) -> np.ndarray:
         if self.model is None:
             raise ValueError("Model not trained. Call fit() before predict().")
         
-        print("features:", self.feature)
-        print("df columns:", df.columns.tolist()) 
+        use_asset_map = bool(self.asset_id_map_)
+        selected_asset = None
 
-        data = df[self.feature].values
+        if use_asset_map:
+            if asset is None:
+                if len(self.asset_names_) == 1:
+                    selected_asset = self.asset_names_[0]
+                else:
+                    raise ValueError(
+                        "Veuillez préciser l'actif pour lequel effectuer la prédiction."
+                    )
+            else:
+                selected_asset = str(asset)
+
+            if selected_asset not in self.asset_id_map_:
+                raise ValueError(
+                    f"Actif inconnu '{selected_asset}'. Actifs disponibles: {self.asset_names_}"
+                )
+        elif asset is not None:
+            selected_asset = str(asset)
+
+        print("features:", self.feature)
+        print("df columns:", df.columns.tolist())
+
+        missing = [col for col in self.feature if col not in df.columns]
+        if missing:
+            raise ValueError(f"Colonnes manquantes pour la prédiction: {missing}")
+
+        augmented = df.copy() if use_asset_map else df
+        if use_asset_map and selected_asset is not None:
+            for other_asset, column in self.asset_id_map_.items():
+                augmented[column] = float(other_asset == selected_asset)
+
+        data = augmented[self.feature].values
+
         if len(data)< self.window_size:
             raise ValueError(f"Not enough data to make predictions. Require at least {self.window_size} data points.")
         
@@ -524,6 +726,8 @@ class LSTMPredictorProba:
             "quantiles": list(self.quantiles),
             "input_size": len(self.feature),
         }
+
+
         with open(os.path.join(dirpath, "meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
         print(f"💾 Modèle sauvegardé dans: {dirpath}")
@@ -551,6 +755,10 @@ class LSTMPredictorProba:
         )
         # force les mêmes quantiles
         predictor.quantiles = tuple(meta.get("quantiles", (0.025, 0.5, 0.975)))
+        
+        predictor.feature = list(meta.get("input_features", predictor.feature))
+        if not predictor.feature:
+            predictor.feature = list(predictor.feature)
 
         # 3) Recharge les scalers
         with open(os.path.join(dirpath, "scaler_x.pkl"), "rb") as f:
@@ -564,7 +772,7 @@ class LSTMPredictorProba:
         map_loc = predictor.device if predictor.device.type == "cpu" else None
 
         predictor.model = LSTMModelProba(
-            input_size=len(predictor.feature),
+            input_size=len(predictor.input_features_),
             hidden_size=predictor.hidden_size,
             horizon=predictor.output_h,
             quantiles=predictor.quantiles,

@@ -1,5 +1,6 @@
 # etf_collector.py
 from __future__ import annotations
+import warnings
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -151,8 +152,11 @@ class EuropeanETFCollector:
             first = float(price_series.iloc[0])
             last = float(price_series.iloc[-1])
 
+            total_return = float(np.nan)
             if np.isfinite(last) and first > 0:
                 total_return = (last - first) / first * 100
+            else:
+                warnings.warn(f"Impossible de calculer le rendement total pour le ticker {ticker}. \nfirst={first}, last={last}")
 
             ret= price_series.pct_change().dropna()
             ann_vol = np.nan

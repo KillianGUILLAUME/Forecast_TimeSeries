@@ -556,7 +556,7 @@ class ETFAnalysisGUI:
     
     @staticmethod
     def bool_env(value:bool) -> str:
-        return "1" if value else "0"
+        return "true" if value else "false"
 
 
     def _get_lstm_env_common(self, action: str):

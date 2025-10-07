@@ -18,12 +18,14 @@ FOREX_TICKERS: Dict[str, str] = {
 }
 
 LSTM_FEATURE_COLUMNS: List[str] = [
-    "adj_close",
-    "volume",
+    "volume_log",
     "ret",
-    "SMA_5",
-    "SMA_20",
-    "SMA_50",
+    "ret_mean_5",
+    "ret_mean_20",
+    "ret_mean_50",
+    "ret_std_20",
+    "ret_std_50",
+    "price_zscore_20",
     "RSI_14",
 ] + [f"{alias}_RET" for alias in FOREX_TICKERS.values()]
 
@@ -176,14 +178,21 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if volume is None:
         volume = pd.Series(0.0, index=df.index)
     volume = pd.to_numeric(volume, errors="coerce").fillna(0.0)
-    work["volume"] = np.log1p(np.clip(volume, a_min=0.0, a_max=None))
+    work["volume_log"] = np.log1p(np.clip(volume, a_min=0.0, a_max=None))
 
     log_price = np.log(price.where(price > 0)).replace([-np.inf, np.inf], np.nan)
     work["ret"] = log_price.diff()
 
-    work["SMA_5"] = price.rolling(window=5, min_periods=5).mean()
-    work["SMA_20"] = price.rolling(window=20, min_periods=20).mean()
-    work["SMA_50"] = price.rolling(window=50, min_periods=50).mean()
+    work["ret_mean_5"] = work["ret"].rolling(window=5, min_periods=5).mean()
+    work["ret_mean_20"] = work["ret"].rolling(window=20, min_periods=20).mean()
+    work["ret_mean_50"] = work["ret"].rolling(window=50, min_periods=50).mean()
+    work["ret_std_20"] = work["ret"].rolling(window=20, min_periods=20).std()
+    work["ret_std_50"] = work["ret"].rolling(window=50, min_periods=50).std()
+
+    rolling_mean_20 = log_price.rolling(window=20, min_periods=20).mean()
+    rolling_std_20 = log_price.rolling(window=20, min_periods=20).std()
+    rolling_std_20 = rolling_std_20.replace(0.0, np.nan)
+    work["price_zscore_20"] = (log_price - rolling_mean_20) / rolling_std_20
 
     delta = price.diff()
     gain = delta.clip(lower=0).rolling(window=14, min_periods=14).mean()
@@ -222,7 +231,9 @@ def append_macro_indicators(features: pd.DataFrame, macro: pd.DataFrame) -> pd.D
         for col in missing:
             enriched[col] = 0.0
 
-    return enriched[LSTM_FEATURE_COLUMNS].astype(float)
+    base_columns = [c for c in LSTM_FEATURE_COLUMNS if c in enriched.columns]
+    result = enriched[base_columns].astype(float)
+    return result
 
 
 
@@ -236,7 +247,12 @@ def build_lstm_features(
     base = compute_technical_indicators(df)
     if base.empty:
         return pd.DataFrame()
-    return append_macro_indicators(base, macro)
+
+    features = append_macro_indicators(base, macro)
+    if "adj_close" in base.columns:
+        adj_close = base["adj_close"].reindex(features.index).astype(float)
+        features = features.assign(adj_close=adj_close)
+    return features
 
 
 
@@ -276,11 +292,12 @@ def prepare_lstm_training_datasets(
     macro_tickers: Optional[Dict[str, str]] = None,
     include_forex: bool = True,
     forex_tickers: Optional[Dict[str, object]] = None,
-) -> Tuple[List[pd.DataFrame], Dict[str, object]]:
-    """Prepare datasets for the probabilistic LSTM training loop."""
+) -> Tuple[List[Tuple[str, pd.DataFrame]], Dict[str, object]]:
+    """Prepare datasets for the probabilistic LSTM training loop.
+    return list of (ticker, df_features) and metadata about kept/dropped tickers."""
 
     tickers = list(tickers or DEFAULT_TRAIN_TICKERS)
-    datasets: List[pd.DataFrame] = []
+    datasets: List[Tuple[str, pd.DataFrame]] = []
     kept: List[Tuple[str, int]] = []
     dropped: Dict[str, str] = {}
 
@@ -297,7 +314,7 @@ def prepare_lstm_training_datasets(
         if window_size is not None and len(prepared.features) < window_size:
             dropped[ticker] = f"série trop courte ({len(prepared.features)} < {window_size})"
             continue
-        datasets.append(prepared.features)
+        datasets.append((ticker, prepared.features))
         kept.append((ticker, len(prepared.features)))
 
     if include_forex:
@@ -320,7 +337,7 @@ def prepare_lstm_training_datasets(
             if window_size is not None and len(prepared.features) < window_size:
                 dropped[alias] = f"série trop courte ({len(prepared.features)} < {window_size})"
                 continue
-            datasets.append(prepared.features)
+            datasets.append((ticker, prepared.features))
             kept.append((alias, len(prepared.features)))
 
 

@@ -713,7 +713,7 @@ class ETFAnalysisGUI:
     
     @staticmethod
     def bool_env(value:bool) -> str:
-        return "1" if value else "0"
+        return "true" if value else "false"
 
 
     def _get_lstm_env_common(self, action: str):
@@ -1347,7 +1347,8 @@ class ETFAnalysisGUI:
     def get_available_tickers(self):
         try:
             from etf_collector import EuropeanETFCollector
-            return EuropeanETFCollector.get_tickers()
+            collector = EuropeanETFCollector()
+            return collector.get_tickers()
         except Exception:
             return ["AAPL", "MSFT", "NVDA", "AMZN", "META", "^GSPC"]
 

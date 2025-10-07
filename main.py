@@ -32,6 +32,15 @@ from data_preprocessing import (
 )
 
 
+def env_var_to_bool(value: Optional[str], default: bool = False) -> bool:
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {'true', '1', 'yes', 'y'}:
+        return True
+    if normalized in {'false', '0', 'no', 'n'}:
+        return False
+    return default
 
 def get_config_from_env():
     """Récupère la configuration depuis les variables d'environnement (interface GUI)"""
@@ -40,10 +49,10 @@ def get_config_from_env():
     return {
         'period': os.getenv('ETF_PERIOD', '5y'),
         'interval': os.getenv('ETF_INTERVAL', '1d'),
-        'light': os.getenv('ETF_LIGHT', 'False').lower() == 'true',
-        'max': os.getenv('ETF_MAX', 'True').lower() == 'true',
+        'light': env_var_to_bool(os.getenv('ETF_LIGHT'), False),
+        'max': env_var_to_bool(os.getenv('ETF_MAX'), True),
         'action': os.getenv('ETF_ACTION', ''),
-        'log_level': os.getenv('ETF_LOG_PLOTS', 'False').lower() == 'true',
+        'log_level': env_var_to_bool(os.getenv('ETF_LOG_PLOTS'), False),
         'tickers': tickers
     }
 
@@ -123,8 +132,12 @@ def build_pipeline(df0: pd.DataFrame) -> pd.DataFrame:
     missing = [col for col in LSTM_FEATURES if col not in feature.columns]
     if missing:
         raise ValueError(f"Colonnes manquantes après construction des indicateurs: {missing}")
+    
+    result = feature[LSTM_FEATURES].copy()
+    if "adj_close" in feature.columns and "adj_close" not in result.columns:
+        result["adj_close"] = feature["adj_close"]
+    return result
 
-    return feature[LSTM_FEATURES]
 
 def build_features_for_ticker(collector: EuropeanETFCollector, ticker: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     df_to_pred = collector.get_one_frame(ticker)
@@ -138,27 +151,6 @@ def build_features_for_ticker(collector: EuropeanETFCollector, ticker: str) -> t
 
 LSTM_FEATURES = LSTM_FEATURE_COLUMNS
 TARGET_FEATURE = 'ret'
-
-
-# def build_lstm_training_frames(frames: List[pd.DataFrame], window_size: int) -> List[pd.DataFrame]:
-#     """Construit les jeux de données enrichis pour l'entraînement (retire les séries trop courtes)."""
-#     processed = []
-#     for df in frames:
-#         if df is None or df.empty:
-#             continue
-#         try:
-#             dfp = build_pipeline(df)
-#         except (ValueError, TypeError) as exc:
-#             print(f"Impossible de construire le pipeline pour une série: {exc}")
-#             continue
-#         if len(dfp) < window_size:
-#             print(f"Série ignorée (longueur {len(dfp)} < fenêtre {window_size}).")
-#             continue
-#         processed.append(dfp)
-#     return processed
-
-
-
 
 
 
@@ -198,8 +190,6 @@ def run_pipeline_for_graphics(
         collector.tickers = tickers
 
 
-    print(f"Tickers sélectionnés ({len(tickers)}): {', '.join(tickers)}")
-
     dfs: List[pd.DataFrame] = collector.get_etf_frames(
         period= "max" if max else period,
         interval=interval)
@@ -207,6 +197,11 @@ def run_pipeline_for_graphics(
     if not dfs:
         print("Aucune donnée n'a pu être téléchargée. Arrêt.")
         sys.exit(1)
+
+    tickers = collector.get_tickers()
+
+    print(f"Tickers sélectionnés ({len(tickers)}): {', '.join(tickers)}")
+
 
 
     # ========================================
@@ -354,7 +349,7 @@ def run_lstm_prediction(collector : EuropeanETFCollector, ticker: str, hp: Dict,
         )
         sys.exit(1)
 
-    predictions = predictor.predict(dfp)
+    predictions = predictor.predict(dfp, asset=ticker)
     predicted_horizon = len(predictions)
     expected_horizon = hp.get('horizon')
 
@@ -381,8 +376,10 @@ def run_lstm_training(
     *,
     tickers: Optional[List[str]] = None,
     period: str = "max",
-    interval: str = "1d",):
-    
+    interval: str = "1d",
+    plot_training: bool = False,
+    plot_dir: Optional[str] = None,):
+
     from prediction_lstm_model import LSTMPredictorProba
 
     if not save_dir:
@@ -397,6 +394,7 @@ def run_lstm_training(
         interval=interval,
         window_size=window_size,
     )
+    #dataset : List[Tuple[str, pd.DataFrame]]
 
     kept = metadata.get('kept', [])
     dropped = metadata.get('dropped', {})
@@ -425,8 +423,10 @@ def run_lstm_training(
         num_layers=hp['num_layers'],
         lr=hp['lr'],
         epochs=hp['epochs'],
-        horizon=hp['horizon'])
-    
+        horizon=hp['horizon'],
+        plot_training=plot_training,
+        plot_dir=plot_dir,)
+
 
     predictor.fit(datasets)
 
