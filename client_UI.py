@@ -15,7 +15,8 @@ import sys
 import requests
 import threading
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
+from typing import Any, Dict
 from services.genai_service import fetch_economic_answer
 
 
@@ -26,12 +27,19 @@ LOGO_PATH = "logo_QuantIA.png"
 
 @dataclass
 class LSTMHyperParams:
-    window_size: int = 100
-    hidden_size: int = 64
-    num_layers: int = 2
+    window_size: int = 1 #100
+    hidden_size: int = 1 #64
+    num_layers: int = 1 #2
     lr: float = 1e-3
-    epochs: int = 200
-    horizon: int = 10
+    epochs: int = 1 #200
+    horizon: int = 10,
+    residual_boosting: bool = False
+    boosting_params: Dict[str,Any] = field(default_factory=lambda: {
+        "n_estimators": 100,
+        "learning_rate": 0.05,
+        "max_depth": 3,
+        "num_leaves":5
+    })
 
     @classmethod
     def from_widget(
@@ -42,25 +50,39 @@ class LSTMHyperParams:
         nl_var: tk.IntVar,
         lr_var: tk.DoubleVar,
         ep_var: tk.IntVar,
-        ho_var: tk.IntVar
+        ho_var: tk.IntVar,
+        residual_var: tk.BooleanVar,
+        boost_estimators_var: tk.IntVar,
+        boost_lr_var: tk.DoubleVar,
+        boost_depth_var: tk.IntVar,
+        boost_leaves_var: tk.IntVar,
     ):
         defaults = cls()
 
         def _coerce(var: tk.Variable, caster, fallback):
             try:
-                value=  caster(var.get())
+                return  caster(var.get())
             except Exception:
                 return fallback
-            return value
+
+        boost_defaults = defaults.boosting_params
+        boosting = {
+            "n_estimators": _coerce(boost_estimators_var, int, boost_defaults.get("n_estimators", 200)),
+            "learning_rate": _coerce(boost_lr_var, float, boost_defaults.get("learning_rate", 0.05)),
+            "max_depth": _coerce(boost_depth_var, int, boost_defaults.get("max_depth", -1)),
+            "num_leaves": _coerce(boost_leaves_var, int, boost_defaults.get("num_leaves", 31)),
+        }
         
 
         return cls(
-            window_size=ws_var.get(),
-            hidden_size=hs_var.get(),
-            num_layers=nl_var.get(),
-            lr=lr_var.get(),
-            epochs=ep_var.get(),
-            horizon=ho_var.get()
+            window_size=_coerce(ws_var, int, defaults.window_size),
+            hidden_size=_coerce(hs_var, int, defaults.hidden_size),
+            num_layers=_coerce(nl_var, int, defaults.num_layers),
+            lr=_coerce(lr_var, float, defaults.lr),
+            epochs=_coerce(ep_var, int, defaults.epochs),
+            horizon=_coerce(ho_var, int, defaults.horizon),
+            residual_boosting=bool(residual_var.get()),
+            boosting_params=boosting,
         )
     
     def to_json(self) -> str:
@@ -107,7 +129,12 @@ class ETFAnalysisGUI:
         self.lr_var = tk.DoubleVar(value=defaults.lr)
         self.ep_var = tk.IntVar(value=defaults.epochs)
         self.ho_var = tk.IntVar(value=defaults.horizon)
-
+        boost_defaults = defaults.boosting_params
+        self.residual_var = tk.BooleanVar(value=defaults.residual_boosting)
+        self.boost_estimators_var = tk.IntVar(value=int(boost_defaults.get("n_estimators", 200)))
+        self.boost_lr_var = tk.DoubleVar(value=float(boost_defaults.get("learning_rate", 0.05)))
+        self.boost_depth_var = tk.IntVar(value=int(boost_defaults.get("max_depth", -1)))
+        self.boost_leaves_var = tk.IntVar(value=int(boost_defaults.get("num_leaves", 31)))
 
 
 
@@ -670,6 +697,50 @@ class ETFAnalysisGUI:
         for c in range(6):
             hp.columnconfigure(c, weight=0)
 
+        boost = ttk.LabelFrame(container, text="LightGBM residual boosting", padding=10)
+        boost.pack(fill="x", pady=8)
+
+        boost_widgets: list[ttk.Entry] = []
+
+        def _refresh_boost_state(*_):
+            state = "normal" if self.residual_var.get() else "disabled"
+            for widget in boost_widgets:
+                widget.configure(state=state)
+
+        ttk.Checkbutton(
+            boost,
+            text="Activer l'ajustement résiduel (LightGBM)",
+            variable=self.residual_var,
+            command=_refresh_boost_state,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 6))
+
+        ttk.Label(boost, text="n_estimators").grid(row=1, column=0, sticky="w", padx=4, pady=2)
+        est_entry = ttk.Entry(boost, textvariable=self.boost_estimators_var, width=10)
+        est_entry.grid(row=1, column=1, padx=4)
+        boost_widgets.append(est_entry)
+
+        ttk.Label(boost, text="learning_rate").grid(row=1, column=2, sticky="w", padx=4, pady=2)
+        lr_entry = ttk.Entry(boost, textvariable=self.boost_lr_var, width=10)
+        lr_entry.grid(row=1, column=3, padx=4)
+        boost_widgets.append(lr_entry)
+
+        ttk.Label(boost, text="max_depth").grid(row=2, column=0, sticky="w", padx=4, pady=2)
+        depth_entry = ttk.Entry(boost, textvariable=self.boost_depth_var, width=10)
+        depth_entry.grid(row=2, column=1, padx=4)
+        boost_widgets.append(depth_entry)
+
+        ttk.Label(boost, text="num_leaves").grid(row=2, column=2, sticky="w", padx=4, pady=2)
+        leaves_entry = ttk.Entry(boost, textvariable=self.boost_leaves_var, width=10)
+        leaves_entry.grid(row=2, column=3, padx=4)
+        boost_widgets.append(leaves_entry)
+
+        for c in range(4):
+            boost.columnconfigure(c, weight=0)
+
+        self.residual_var.trace_add("write", lambda *_: _refresh_boost_state())
+        _refresh_boost_state()
+
+
         # --- Dossier modèle (save/load) ---
         mdl = ttk.LabelFrame(container, text="Checkpoint modèle", padding=10)
         mdl.pack(fill="x", pady=8)
@@ -697,7 +768,12 @@ class ETFAnalysisGUI:
             nl_var=self.nl_var,
             lr_var=self.lr_var,
             ep_var=self.ep_var,
-            ho_var=self.ho_var
+            ho_var=self.ho_var,
+            residual_var=self.residual_var,
+            boost_estimators_var=self.boost_estimators_var,
+            boost_lr_var=self.boost_lr_var,
+            boost_depth_var=self.boost_depth_var,
+            boost_leaves_var=self.boost_leaves_var,            
         )
     
     def selected_gaphics_tickers(self) -> list[str]:

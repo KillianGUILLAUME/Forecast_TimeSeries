@@ -13,6 +13,8 @@ from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 
+import copy
+
 from data_preprocessing import (
     download_price_history,
     build_lstm_features,
@@ -602,7 +604,7 @@ def render_visualisations(summary: pd.DataFrame, prices: Dict[str, pd.DataFrame]
 
 def render_lstm_prediction() -> None:
     st.subheader("Prédiction LSTM probabiliste")
-    defaults = DEFAULT_LSTM_HP.copy()
+    defaults = copy.deepcopy(DEFAULT_LSTM_HP)
 
     st.markdown("### Recherche Yahoo Finance")
     query = st.text_input(
@@ -704,7 +706,10 @@ def render_lstm_prediction() -> None:
     except Exception as exc:  # pragma: no cover - runtime safety
         st.error(f"Impossible de charger le modèle: {exc}")
         return
+    
     effective_horizon = int(getattr(predictor, "output_h", requested_horizon))
+    if getattr(predictor, "use_residual_boosting", False) and getattr(predictor, "residual_models_", None):
+        st.info("Ce modèle utilise un ajustement résiduel LightGBM sur les quantiles.")    
     if requested_horizon != effective_horizon:
         st.info(
             "L'horizon effectif du modèle chargé est de "
@@ -767,7 +772,8 @@ def render_lstm_prediction() -> None:
 
 def render_lstm_training() -> None:
     st.subheader("Entraînement du modèle LSTM")
-    defaults = DEFAULT_LSTM_HP.copy()
+    defaults = copy.deepcopy(DEFAULT_LSTM_HP)
+    boost_defaults = defaults.get("boosting_params",{})
     default_tickers = ", ".join(resolve_training_universe([])[:5])
 
     with st.form("training_form"):
@@ -784,6 +790,42 @@ def render_lstm_training() -> None:
         lr = st.number_input("Taux d'apprentissage", min_value=1e-5, max_value=1e-1, value=float(defaults["lr"]), format="%e")
         epochs = st.number_input("Nombre d'époques", min_value=1, max_value=2000, value=int(defaults["epochs"]))
         horizon = st.number_input("Horizon de prédiction", min_value=1, max_value=90, value=int(defaults["horizon"]))
+        use_boosting = st.checkbox(
+            "Activer LightGBM residual boosting",
+            value=bool(defaults.get("residual_boosting", False)),
+            help="Ajuste les quantiles du LSTM avec un modèle LightGBM par quantile.",
+        )
+        b_col1, b_col2, b_col3, b_col4 = st.columns(4)
+        with b_col1:
+            boost_estimators = st.number_input(
+                "n_estimators",
+                min_value=10,
+                max_value=2000,
+                value=int(boost_defaults.get("n_estimators", 200)),
+                step=10,
+            )
+        with b_col2:
+            boost_lr = st.number_input(
+                "learning_rate",
+                min_value=1e-4,
+                max_value=1.0,
+                value=float(boost_defaults.get("learning_rate", 0.05)),
+                format="%f",
+            )
+        with b_col3:
+            boost_depth = st.number_input(
+                "max_depth",
+                min_value=-1,
+                max_value=64,
+                value=int(boost_defaults.get("max_depth", -1)),
+            )
+        with b_col4:
+            boost_leaves = st.number_input(
+                "num_leaves",
+                min_value=2,
+                max_value=512,
+                value=int(boost_defaults.get("num_leaves", 31)),
+            )
         submit = st.form_submit_button("Lancer l'entraînement")
 
     if not submit:
@@ -801,6 +843,13 @@ def render_lstm_training() -> None:
         "lr": float(lr),
         "epochs": int(epochs),
         "horizon": int(horizon),
+        "residual_boosting": bool(use_boosting),
+        "boosting_params": {
+            "n_estimators": int(boost_estimators),
+            "learning_rate": float(boost_lr),
+            "max_depth": int(boost_depth),
+            "num_leaves": int(boost_leaves),
+        },        
     }
 
     with st.spinner("Préparation des jeux de données..."):

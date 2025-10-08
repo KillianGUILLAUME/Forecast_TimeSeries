@@ -7,9 +7,11 @@ import pandas as pd
 from pathlib import Path
 from sklearn.model_selection import TimeSeriesSplit
 
+from lightgbm import LGBMRegressor
+
 from sklearn.preprocessing import StandardScaler
 
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union, Generator
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union, Generator
 
 import matplotlib.pyplot as plt
 
@@ -121,6 +123,14 @@ def inverse_transform_quantiles(q_scaled, scaler_y):
     return q
 
 
+def enforce_monotonic_quantiles(q: np.ndarray) -> np.ndarray:
+    """Assure la monotonie croissante des quantiles sur le dernier axe."""
+    if q.ndim == 0:
+        return q
+    q_adj = np.array(q, copy=True)
+    for j in range(1, q_adj.shape[-1]):
+        q_adj[..., j] = np.maximum(q_adj[..., j - 1], q_adj[..., j])
+    return q_adj
 
 
 
@@ -184,7 +194,8 @@ class LSTMModelProba(nn.Module):
 
 class LSTMPredictorProba:
     def __init__(self, feature: List[str], target_feature :str, window_size: int=10, hidden_size: int=50, horizon : int = 10, num_layers: int=3, lr: float=0.001, epochs: int=1000,
-                 *, plot_training: bool = False, plot_dir: Optional[Union[str, os.PathLike[str]]] = None, walkforward_splits: int=5, walkforward_test_size: Optional[int]= None):
+                 *, plot_training: bool = False, plot_dir: Optional[Union[str, os.PathLike[str]]] = None, walkforward_splits: int=5, walkforward_test_size: Optional[int]= None,
+                 residual_boosting: bool = False, boosting_params: Optional[Dict[str, Any]] = None):
         unique_features = []
         for name in feature:
             if name not in unique_features:
@@ -218,6 +229,14 @@ class LSTMPredictorProba:
         self.y_test_last: Optional[torch.Tensor] = None
         self.plot_training = plot_training
         self.plot_dir = Path(plot_dir) if plot_dir is not None else None
+        self.use_residual_boosting = residual_boosting
+        self.boosting_params = dict(boosting_params or {})
+        self.residual_models_: Dict[float, LGBMRegressor] = {}
+        self._boost_feature_dim: Optional[int] = None
+        self.asset_id_map_: Dict[str, str] = {}
+        self.asset_names_: List[str] = []
+
+
     def fit(self, frames: Union[pd.DataFrame,Iterable[Union[pd.DataFrame, Tuple[str, pd.DataFrame]]],]):
 
         if isinstance(frames, pd.DataFrame):
@@ -331,6 +350,8 @@ class LSTMPredictorProba:
         global_best_loss = float("inf")
 
 
+        oof_feats_list: List[np.ndarray] = []
+        oof_residuals_list: List[np.ndarray] = []
         for split_idx, (X_train, y_train, X_val, y_val, train_idx, val_idx) in enumerate(splits, start=1):
             train_range = (int(train_idx[0]), int(train_idx[-1])) if len(train_idx) else (None, None)
             val_range = (int(val_idx[0]), int(val_idx[-1])) if len(val_idx) else (None, None)
@@ -349,13 +370,11 @@ class LSTMPredictorProba:
 
             X_train_np = X_train.detach().cpu().numpy().reshape(-1, F)
             X_val_np = X_val.detach().cpu().numpy().reshape(-1, F)
-            scaler_x.fit(X_train_np)
             X_train_scaled = scaler_x.fit_transform(X_train_np).astype(np.float32).reshape(Ntr, T, F)
             X_val_scaled = scaler_x.transform(X_val_np).astype(np.float32).reshape(Nval, T, F)
 
             y_train_np = y_train.detach().cpu().numpy()
             y_val_np = y_val.detach().cpu().numpy()
-            scaler_y.fit(y_train_np)
             y_train_scaled = scaler_y.fit_transform(y_train_np).astype(np.float32)
             y_val_scaled = scaler_y.transform(y_val_np).astype(np.float32)
 
@@ -439,12 +458,24 @@ class LSTMPredictorProba:
                 lr_to_plot[epoch-1]=optimizer.param_groups[0]['lr']
                 loss_plot[epoch-1]=train_loss
                 val_plot[epoch-1]=val_loss
-                if (epoch+1) % 25 == 0:
+                if (epoch+1) % 5 == 0:
                     print(f'Epoch [{epoch+1}/{self.epochs}]| Train: {train_loss:.4f} | val: {val_loss:.4f} | LR: {optimizer.param_groups[0]["lr"]:.6f}')
             
             model.load_state_dict(best_state_split)
 
             model.eval()
+            train_preds_scaled_list: List[np.ndarray] = []
+            train_y_scaled_list: List[np.ndarray] = []
+            train_eval_dl = torch.utils.data.DataLoader(train_ds, batch_size=256, shuffle=False)
+            with torch.no_grad():
+                for xb, yb in train_eval_dl:
+                    qb = model(xb.to(self.device).float()).cpu().numpy()
+                    train_preds_scaled_list.append(qb)
+                    train_y_scaled_list.append(yb.numpy())
+
+            train_q_scaled = np.concatenate(train_preds_scaled_list, axis=0)
+            train_y_scaled = np.concatenate(train_y_scaled_list, axis=0)
+
             preds_scaled_list, y_scaled_list = [], []
             with torch.no_grad():
                 for xb, yb in val_dl:
@@ -456,6 +487,15 @@ class LSTMPredictorProba:
             y_scaled = np.concatenate(y_scaled_list, axis=0)
             q = inverse_transform_quantiles(q_scaled, scaler_y)
             y = scaler_y.inverse_transform(y_scaled)
+
+            
+            X_val_seq_scaled = X_val_scaled_torch.cpu().numpy()          # (N_val, T, F)
+            X_val_tab = self._build_boost_features(X_val_seq_scaled)     # (N_val*H, D)
+            res_val = y[:, :, None] - q                                  # (N_val, H, Q)
+
+            # remodelage pour empilement OOF
+            oof_feats_list.append(X_val_tab)                              # (N_val*H, D)
+            oof_residuals_list.append(res_val.reshape(-1, res_val.shape[-1]))  # (N_val*H, Q)            
 
             metrics = coverage_metrics(
                 y_true=y,
@@ -495,6 +535,10 @@ class LSTMPredictorProba:
                     "scaler_y": copy.deepcopy(scaler_y),
                     "X_val_scaled": X_val_scaled_torch.clone(),
                     "y_val_scaled": y_val_scaled_torch.clone(),
+                    "X_train_scaled": X_train_scaled_torch.clone(),
+                    "y_train_scaled": y_train_scaled_torch.clone(),
+                    "train_q_scaled": train_q_scaled.copy(),
+                    "train_y_scaled": train_y_scaled.copy(),                    
                     "lr_history": lr_to_plot.copy(),
                     "train_history": loss_plot.copy(),
                     "val_history": val_plot.copy(),
@@ -503,7 +547,7 @@ class LSTMPredictorProba:
 
         if best_artifacts is None:
             raise ValueError("Aucun modèle valide n'a été entraîné lors du walk-forward.")
-        
+        print('one st au vrai modele')
         self.model = LSTMModelProba(
             input_size=len(self.feature),
             hidden_size=self.hidden_size,
@@ -526,6 +570,14 @@ class LSTMPredictorProba:
             "val_loss": best_artifacts["val_history"],
             "split": best_artifacts["split"],
         }
+        print('on est aux résidus')
+
+        if self.use_residual_boosting:
+            sequences_scaled = best_artifacts["X_train_scaled"].cpu().numpy()
+            y_train_scaled_np = best_artifacts["y_train_scaled"].cpu().numpy()
+            train_q_scaled = best_artifacts["train_q_scaled"]
+            self._fit_residual_models(sequences_scaled, y_train_scaled_np, train_q_scaled)
+
 
         if self.walkforward_metrics_:
             val_losses = np.array([m["val_loss"] for m in self.walkforward_metrics_], dtype=np.float64)
@@ -544,8 +596,9 @@ class LSTMPredictorProba:
             }
         else:
             self.walkforward_summary_ = None
+        print('on va plot')
 
-        if self.training_curves_ and self.training_curves_["lr"]:
+        if self.training_curves_ and "lr" in self.training_curves_ and len(self.training_curves_["lr"]) > 0:
             lr_hist = np.array(self.training_curves_["lr"], dtype=np.float64)
             train_hist = np.array(self.training_curves_["train_loss"], dtype=np.float64)
             val_hist = np.array(self.training_curves_["val_loss"], dtype=np.float64)
@@ -570,6 +623,46 @@ class LSTMPredictorProba:
             plt.tight_layout()
             plt.legend()
             plt.show()
+        print('on a plot')
+
+
+    def _build_boost_features(self, sequences_scaled: np.ndarray) -> np.ndarray:
+        seq_arr = np.asarray(sequences_scaled, dtype=np.float32)
+        if seq_arr.ndim == 2:
+            seq_arr = seq_arr[np.newaxis, ...]
+        if seq_arr.ndim != 3:
+            raise ValueError("Les séquences doivent avoir la forme (N, T, F).")
+
+        N, T, F = seq_arr.shape
+        base = seq_arr.reshape(N, T * F)
+        base_rep = np.repeat(base, self.output_h, axis=0)
+        horizon_idx = np.tile(np.arange(self.output_h, dtype=np.float32), N).reshape(-1, 1)
+        features = np.hstack([base_rep, horizon_idx])
+        return features
+
+    def _fit_residual_models(self, sequences_scaled: np.ndarray, y_scaled: np.ndarray, q_scaled: np.ndarray) -> None:
+        if not self.use_residual_boosting:
+            return
+        if sequences_scaled.size == 0:
+            return
+        print('ici fit_res')
+
+        X_tab = self._build_boost_features(sequences_scaled)
+        y_unscaled = self.scaler_y.inverse_transform(y_scaled)
+        q_unscaled = inverse_transform_quantiles(q_scaled, self.scaler_y)
+        residuals = y_unscaled[:, :, None] - q_unscaled
+
+        models: Dict[float, LGBMRegressor] = {}
+        for idx, q_level in enumerate(self.quantiles):
+            print("Fitting residual model for quantile", q_level)
+            model = LGBMRegressor(objective="quantile", alpha=q_level, n_jobs=1, **self.boosting_params)
+            target = residuals[:, :, idx].reshape(-1)
+            model.fit(X_tab, target)
+            models[q_level] = model
+            print(model.get_params())
+
+        self.residual_models_ = models
+        self._boost_feature_dim = X_tab.shape[1]
 
 
     def predict(self, df: pd.DataFrame, asset: Optional[str] = None) -> np.ndarray:
@@ -626,7 +719,23 @@ class LSTMPredictorProba:
             q_ret_scaled = self.model(input).cpu().numpy()  # (1, H, Q)
         
         q_ret = inverse_transform_quantiles(q_ret_scaled, self.scaler_y).squeeze(0)
+        q_ret = enforce_monotonic_quantiles(q_ret)
 
+        if self.use_residual_boosting and self.residual_models_:
+            seq_scaled = last_scaled[np.newaxis, ...]
+            X_tab = self._build_boost_features(seq_scaled)
+            if self._boost_feature_dim is not None and X_tab.shape[1] != self._boost_feature_dim:
+                raise ValueError("Dimension de features incohérente pour le modèle de boosting.")
+            residual_preds = []
+            for q_idx, q_level in enumerate(self.quantiles):
+                model = self.residual_models_.get(q_level)
+                if model is None:
+                    residual_preds.append(np.zeros(self.output_h, dtype=np.float32))
+                    continue
+                res = model.predict(X_tab).reshape(self.output_h)
+                residual_preds.append(res.astype(np.float32))
+            residual_matrix = np.stack(residual_preds, axis=-1)
+            q_ret = enforce_monotonic_quantiles(q_ret + residual_matrix)
         last_p = df['adj_close'].iloc[-1]
 
         P_q = last_p * np.exp(q_ret)
@@ -675,6 +784,21 @@ class LSTMPredictorProba:
 
         # 2) Inverse-transform en échelle d'origine
         q = inverse_transform_quantiles(q_scaled, self.scaler_y)  # (N,H,Q)
+        if self.use_residual_boosting and self.residual_models_:
+            seq_scaled = self.X_test_scaled_torch.cpu().numpy()
+            X_tab = self._build_boost_features(seq_scaled)
+            residual_preds = []
+            for q_idx, q_level in enumerate(self.quantiles):
+                model = self.residual_models_.get(q_level)
+                if model is None:
+                    residual_preds.append(np.zeros((seq_scaled.shape[0], self.output_h), dtype=np.float32))
+                    continue
+                preds = model.predict(X_tab).reshape(seq_scaled.shape[0], self.output_h)
+                residual_preds.append(preds.astype(np.float32))
+            residual_matrix = np.stack(residual_preds, axis=-1)
+            q = enforce_monotonic_quantiles(q + residual_matrix)
+        else:
+            q = enforce_monotonic_quantiles(q)
         y = self.scaler_y.inverse_transform(y_scaled)             # (N,H)
 
         # 3) Sépare q_low, q_med, q_high
@@ -712,6 +836,11 @@ class LSTMPredictorProba:
             pickle.dump(self.scaler_x, f)
         with open(os.path.join(dirpath, "scaler_y.pkl"), "wb") as f:
             pickle.dump(self.scaler_y, f)
+        residual_models_file = None
+        if self.use_residual_boosting and self.residual_models_:
+            residual_models_file = "residual_models.pkl"
+            with open(os.path.join(dirpath, residual_models_file), "wb") as f:
+                pickle.dump(self.residual_models_, f)
 
         # 3) Méta / config (pour reconstruire l’architecture)
         meta = {
@@ -725,6 +854,10 @@ class LSTMPredictorProba:
             "horizon": self.output_h,
             "quantiles": list(self.quantiles),
             "input_size": len(self.feature),
+            "use_residual_boosting": self.use_residual_boosting,
+            "boosting_params": self.boosting_params,
+            "boost_feature_dim": self._boost_feature_dim,
+            "residual_models_file": residual_models_file,            
         }
 
 
@@ -752,10 +885,12 @@ class LSTMPredictorProba:
             num_layers=meta["num_layers"],
             lr=0.0,      # inutilisé pour l'inférence
             epochs=0,    # idem
+            residual_boosting=meta.get("use_residual_boosting", False),
+            boosting_params=meta.get("boosting_params"),            
         )
         # force les mêmes quantiles
         predictor.quantiles = tuple(meta.get("quantiles", (0.025, 0.5, 0.975)))
-        
+
         predictor.feature = list(meta.get("input_features", predictor.feature))
         if not predictor.feature:
             predictor.feature = list(predictor.feature)
@@ -772,7 +907,7 @@ class LSTMPredictorProba:
         map_loc = predictor.device if predictor.device.type == "cpu" else None
 
         predictor.model = LSTMModelProba(
-            input_size=len(predictor.input_features_),
+            input_size=len(predictor.feature),
             hidden_size=predictor.hidden_size,
             horizon=predictor.output_h,
             quantiles=predictor.quantiles,
@@ -782,6 +917,14 @@ class LSTMPredictorProba:
         state = torch.load(os.path.join(dirpath, "model.pt"), map_location=map_loc)
         predictor.model.load_state_dict(state)
         predictor.model.eval()
+        predictor._boost_feature_dim = meta.get("boost_feature_dim")
+        predictor.boosting_params = dict(meta.get("boosting_params", {}))
+        residual_models_file = meta.get("residual_models_file")
+        if predictor.use_residual_boosting and residual_models_file:
+            models_path = os.path.join(dirpath, residual_models_file)
+            if os.path.exists(models_path):
+                with open(models_path, "rb") as f:
+                    predictor.residual_models_ = pickle.load(f)
 
         print(f"📦 Modèle chargé depuis: {dirpath}")
         return predictor

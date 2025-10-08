@@ -35,7 +35,7 @@ from data_preprocessing import (
 def env_var_to_bool(value: Optional[str], default: bool = False) -> bool:
     if value is None:
         return default
-    normalized = value.strip().lower()
+    normalized = str(value).strip().lower()
     if normalized in {'true', '1', 'yes', 'y'}:
         return True
     if normalized in {'false', '0', 'no', 'n'}:
@@ -57,12 +57,19 @@ def get_config_from_env():
     }
 
 DEFAULT_LSTM_HP = {
-    "window_size": 100,
-    "hidden_size": 64,
-    "num_layers": 2,
+    "window_size": 1, #100
+    "hidden_size": 1, #64
+    "num_layers": 1, #2
     "lr": 1e-3,
-    "epochs": 200,
+    "epochs": 1, #200
     "horizon": 10,
+    "residual_boosting": False,
+    "boosting_params": {
+        "n_estimators": 130, #200
+        "learning_rate": 0.05,
+        "max_depth": 3,
+        "num_leaves": 31, #31
+    },    
 }
 
 HP_CASTERS = {
@@ -94,6 +101,7 @@ def get_lstm_from_env():
 def normalize_lstm_hp(raw_hp: Dict) -> Dict[str, float]:
     """Normalise les hyperparamètres reçus (convertit en bons types + défauts)."""
     hp = DEFAULT_LSTM_HP.copy()
+    hp["boosting_params"] = dict(DEFAULT_LSTM_HP.get("boosting_params", {}))    
     if not isinstance(raw_hp, dict):
         return hp
     for key, caster in HP_CASTERS.items():
@@ -103,6 +111,43 @@ def normalize_lstm_hp(raw_hp: Dict) -> Dict[str, float]:
             hp[key] = caster(raw_hp[key])
         except (TypeError, ValueError):
             print(f"Hyperparamètre '{key}' invalide ({raw_hp[key]!r}), valeur par défaut {hp[key]} conservée.")
+
+    if "residual_boosting" in raw_hp:
+        hp["residual_boosting"] = env_var_to_bool(raw_hp["residual_boosting"], hp["residual_boosting"])
+
+    def _coerce(value, caster, fallback):
+        try:
+            return caster(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    raw_boost = raw_hp.get("boosting_params") if isinstance(raw_hp, dict) else None
+    if isinstance(raw_boost, str):
+        try:
+            raw_boost = json.loads(raw_boost)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw_boost = None
+    if isinstance(raw_boost, dict):
+        for key, value in raw_boost.items():
+            if value is None:
+                continue
+            if key in {"n_estimators", "max_depth", "num_leaves"}:
+                hp["boosting_params"][key] = _coerce(value, int, hp["boosting_params"].get(key))
+            elif key == "learning_rate":
+                hp["boosting_params"][key] = _coerce(value, float, hp["boosting_params"].get(key))
+            else:
+                hp["boosting_params"][key] = value
+
+    alias_map = {
+        "boosting_n_estimators": ("n_estimators", int),
+        "boosting_learning_rate": ("learning_rate", float),
+        "boosting_max_depth": ("max_depth", int),
+        "boosting_num_leaves": ("num_leaves", int),
+    }
+    for alias, (target_key, caster) in alias_map.items():
+        if alias in raw_hp:
+            hp["boosting_params"][target_key] = _coerce(raw_hp[alias], caster, hp["boosting_params"].get(target_key))
+
     return hp
 
 
@@ -337,6 +382,9 @@ def run_lstm_prediction(collector : EuropeanETFCollector, ticker: str, hp: Dict,
     predictor = LSTMPredictorProba.load(load_dir)
     print(f"modele chargé depuis {load_dir}")
 
+    if getattr(predictor, "use_residual_boosting", False) and getattr(predictor, "residual_models_", None):
+        print("Modèles LightGBM résiduels chargés pour l'ajustement des quantiles.")    
+
     df_to_pred = collector.get_one_frame(ticker)
     if df_to_pred is None or df_to_pred.empty:
         print(f"Aucune donnée disponible pour le ticker {ticker}.")
@@ -415,6 +463,9 @@ def run_lstm_training(
 
     print(f'modele training with {len(datasets)} series, window_size={window_size}')
 
+    residual_boosting = env_var_to_bool(hp.get('residual_boosting'), False)
+    boosting_params = dict(hp.get('boosting_params', {}))
+    print('on rentre danns le training')
     predictor = LSTMPredictorProba(
         feature=LSTM_FEATURES,
         target_feature=TARGET_FEATURE,
@@ -425,14 +476,25 @@ def run_lstm_training(
         epochs=hp['epochs'],
         horizon=hp['horizon'],
         plot_training=plot_training,
-        plot_dir=plot_dir,)
+        plot_dir=plot_dir,
+        residual_boosting=residual_boosting,
+        boosting_params=boosting_params or None,
+        )
+    print('init du modele ok')
 
-
+    if residual_boosting:
+        print(
+            "LightGBM residual boosting activé avec paramètres:",
+            {k: boosting_params.get(k) for k in sorted(boosting_params)},
+        )
+    print("Démarrage de l'entraînement...")
     predictor.fit(datasets)
-
+    print('on a fini')
     os.makedirs(save_dir, exist_ok=True)
     predictor.save(save_dir)
     print("✅ Entraînement terminé et modèle sauvegardé.")
+    collector = EuropeanETFCollector()
+    run_lstm_prediction(collector, datasets[0][0], hp, save_dir)
 
 
 def run_graphics():
