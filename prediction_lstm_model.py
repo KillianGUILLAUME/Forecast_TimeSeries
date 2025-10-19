@@ -23,7 +23,10 @@ from datetime import datetime
 
 
 
-def make_sequence_multi_horizon(df: pd.DataFrame, feature: List[str], window_size: int, target_feature: str, H:int = 10) -> Tuple[torch.tensor, torch.tensor]:
+def make_sequence_multi_horizon(
+        df: pd.DataFrame, feature: List[str], window_size: int, target_feature: str, H:int = 10
+        ) -> Tuple[torch.tensor, torch.tensor]:
+    
     if len(feature) == 1: #feature[0] = target_feature
         data = df[feature].values
         sequences, targets= [],[]
@@ -145,7 +148,7 @@ def quantile_loss(y_pred, y_true, quantiles):
 
 class LSTMModelProba(nn.Module):
     def __init__(self, input_size, hidden_size, horizon, quantiles=(0.025, 0.5, 0.975),
-                 num_layers=3, dropout=0.2):
+                 num_layers=3, p_in=0.15, p_post=0.30):
         super().__init__()
         self.horizon = horizon
         self.quantiles = quantiles
@@ -153,11 +156,12 @@ class LSTMModelProba(nn.Module):
 
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.num_directions = 2
+        self.num_directions = 1
 
         self.in_norm = nn.LayerNorm(input_size)
+        self.in_drop  = nn.Dropout1d(p_in)
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
-                            batch_first=True, dropout=dropout, bidirectional=True)
+                            batch_first=True, dropout=0.0, bidirectional=False)
 
         d_in = hidden_size * self.num_directions
         d_mid = max(64, hidden_size)
@@ -165,8 +169,8 @@ class LSTMModelProba(nn.Module):
         self.attn = nn.Linear(d_in, 1)
 
         self.head = nn.Sequential(
-            nn.Linear(d_in, d_mid), nn.GELU(), nn.Dropout(dropout),
-            nn.Linear(d_mid, d_mid), nn.GELU(), nn.Dropout(dropout)
+            nn.Linear(d_in, d_mid), nn.GELU(), nn.Dropout(p_post),
+            nn.Linear(d_mid, d_mid), nn.GELU(), nn.Dropout(p_post)
         )
         self.proj = nn.Linear(d_in, d_mid) if d_in != d_mid else nn.Identity()
         # → on prédit H * Q sorties (quantiles des rendements cumulés)
@@ -174,10 +178,13 @@ class LSTMModelProba(nn.Module):
 
     def forward(self, x):
         x = self.in_norm(x)
-        out,_ = self.lstm(x)                                  # (B,T,2H)
+        x = x.transpose(1, 2)                         
+        x = self.in_drop(x)
+        x = x.transpose(1, 2)        
+        out,_ = self.lstm(x)                                  # (B,T,num_directionsr*H)
         e = torch.tanh(self.attn(out))                        # (B,T,1)
         w = torch.softmax(e.squeeze(-1), dim=1)               # (B,T)
-        h = (out * w.unsqueeze(-1)).sum(dim=1)                # (B,2H)
+        h = (out * w.unsqueeze(-1)).sum(dim=1)                # (B,num_directions*H)
 
         z = self.head(h)
         z = z + self.proj(h)
@@ -190,6 +197,7 @@ class LSTMModelProba(nn.Module):
         deltas = torch.nn.functional.softplus(raw[:,:,1:])    # (B,H,Q-1) >= 0
         q = torch.cat([q0, q0 + torch.cumsum(deltas, dim=2)], dim=2)  # (B,H,Q)
         return q
+
     
 
 class LSTMPredictorProba:
@@ -228,7 +236,7 @@ class LSTMPredictorProba:
         self.X_test_scaled_torch: Optional[torch.Tensor] = None
         self.y_test_last: Optional[torch.Tensor] = None
         self.plot_training = plot_training
-        self.plot_dir = Path(plot_dir) if plot_dir is not None else None
+        self.plot_dir = None
         self.use_residual_boosting = residual_boosting
         self.boosting_params = dict(boosting_params or {})
         self.residual_models_: Dict[float, LGBMRegressor] = {}
@@ -251,7 +259,6 @@ class LSTMPredictorProba:
         indices: List[pd.Index] = []
 
         clean_frames: List[pd.DataFrame] = []
-        print(frames[0][1].head())
 
         for frame in iterable:
             if frame is None or len(frame) == 0:
@@ -277,34 +284,81 @@ class LSTMPredictorProba:
                 "Aucun jeu de données exploitable après validation des caractéristiques."
             )
         
-
+        all_dates_set = set()
 
         for frame in clean_frames:
-            s, t = make_sequence_multi_horizon(
-                frame,
-                feature=self.feature,
-                target_feature=self.target_feature,
-                window_size=self.window_size,
-                H=self.output_h,
-            )
-            if len(s) > 0:
-                seq_list.append(s)
-                targ_list.append(t)
-                indices.append(frame.index)
-        if not seq_list:
-            raise ValueError("Aucune séquence générée (données insuffisantes).")
+            all_dates_set.update(frame.index)
 
-        sequences = torch.cat(seq_list, dim=0)
-        targets  = torch.cat(targ_list, dim=0)
+        all_unique_sorted_dates = pd.Index(sorted(list(all_dates_set)))
+        print(f'data goes from {all_unique_sorted_dates.min().date()} to {all_unique_sorted_dates.max().date()} with {len(all_unique_sorted_dates)} unique dates across all assets.')
 
-        """Overlook of constructed dataset"""
+        n_splits = self.walkforward_splits 
+        test_size = self.walkforward_test_size
 
-        N, T, F = sequences.shape
-        H = targets.shape[1]
-        print(f"\n[PREVIEW] sequences: N={N}, T={T}, F={F} | targets: H={H}")
-        print(f"Features utilisées (ordre): {self.feature}")
-        print("Répartition des fenêtres par actif:")
+        try:
+            tscv = TimeSeriesSplit(n_splits=n_splits, test_size=test_size)
+        except ValueError as exc:
+            # Cela peut arriver si test_size est trop grand par rapport au nb de dates
+            raise ValueError(f"Erreur TimeSeriesSplit sur les dates: {exc}")
+        
+        date_splits = []
+        # On splitte les *indices* de notre liste de dates
+        for train_idx, val_idx in tscv.split(all_unique_sorted_dates):
+            if len(train_idx) == 0 or len(val_idx) == 0:
+                continue
+                
+            # On récupère les dates de début et de fin pour ce pli
+            train_start_date = all_unique_sorted_dates[train_idx[0]]
+            train_end_date = all_unique_sorted_dates[train_idx[-1]]
+            
+            val_start_date = all_unique_sorted_dates[val_idx[0]]
+            val_end_date = all_unique_sorted_dates[val_idx[-1]]
+            
+            train_fold_dates = (train_start_date, train_end_date)
+            val_fold_dates = (val_start_date, val_end_date)
+            
+            date_splits.append( (train_fold_dates, val_fold_dates) )
+
+        if not date_splits:
+            raise ValueError("Impossible de créer des splits walk-forward (données/dates insuffisantes).")
+
+        print(f"\n{len(date_splits)} plis de validation croisée (walk-forward) ont été définis.")
+        for i, (train_d, val_d) in enumerate(date_splits, 1):
+            print(f"  Pli {i}: Train [{train_d[0].date()} -> {train_d[1].date()}], Val [{val_d[0].date()} -> {val_d[1].date()}]")
+
+        """
+        # for frame in clean_frames:
+        #     s, t = make_sequence_multi_horizon(
+        #         frame,
+        #         feature=self.feature,
+        #         target_feature=self.target_feature,
+        #         window_size=self.window_size,
+        #         H=self.output_h,
+        #     )
+        #     if len(s) > 0:
+        #         seq_list.append(s)
+        #         targ_list.append(t)
+        #         indices.append(frame.index)
+        # if not seq_list:
+        #     raise ValueError("Aucune séquence générée (données insuffisantes).")
+
+        # sequences = torch.cat(seq_list, dim=0)
+        # targets  = torch.cat(targ_list, dim=0)
+
+        # Overlook of constructed dataset
+
+        # N, T, F = sequences.shape
+        # H = targets.shape[1]
+        # print(f"\n[PREVIEW] sequences: N={N}, T={T}, F={F} | targets: H={H}")
+        # print(f"Features utilisées (ordre): {self.feature}")
+
+        """
+
+        # print("Répartition des fenêtres par actif:")
         # 1) stats globales par feature (sur toutes les séquences et toutes les étapes)
+
+
+        """
         with torch.no_grad():
             feat_mean = sequences.float().mean(dim=(0, 1)).cpu().numpy()
             feat_std = sequences.float().std(dim=(0, 1)).cpu().numpy()
@@ -341,10 +395,10 @@ class LSTMPredictorProba:
             raise ValueError("Impossible de générer les splits walk-forward: vérifie la taille de l'échantillon.") from exc
 
         if not splits:
-            raise ValueError("Impossible de créer des splits walk-forward (données insuffisantes).")
+            raise ValueError("Impossible de créer des splits walk-forward (données insuffisantes).")"""
 
-        self.df_index_ = indices[-1] if indices else None
-        self.walkforward_metrics_.clear()
+        # self.df_index_ = indices[-1] if indices else None
+        # self.walkforward_metrics_.clear()
 
         best_artifacts = None
         global_best_loss = float("inf")
@@ -352,45 +406,117 @@ class LSTMPredictorProba:
 
         oof_feats_list: List[np.ndarray] = []
         oof_residuals_list: List[np.ndarray] = []
-        for split_idx, (X_train, y_train, X_val, y_val, train_idx, val_idx) in enumerate(splits, start=1):
-            train_range = (int(train_idx[0]), int(train_idx[-1])) if len(train_idx) else (None, None)
-            val_range = (int(val_idx[0]), int(val_idx[-1])) if len(val_idx) else (None, None)
-            print(f"\n[Split {split_idx}/{len(splits)}] train={train_range} | val={val_range}")
 
-            Ntr, T, F = X_train.shape
-            Nval = X_val.shape[0]
+        for split_idx, (train_fold_dates, val_fold_dates) in enumerate(date_splits, 1):
+            
+            print(f"\n--- Démarrage Pli {split_idx}/{len(date_splits)} ---")
+            print(f"  Train: {train_fold_dates[0].date()} -> {train_fold_dates[1].date()}")
+            print(f"  Val:   {val_fold_dates[0].date()} -> {val_fold_dates[1].date()}")
 
-            if Ntr == 0 or Nval == 0:
-                print("[WARNING] Split ignoré faute d'observations suffisantes.")
+            # --- ÉTAPE 3 : AJUSTEMENT (FIT) DES SCALERS ---
+            # On ajuste les scalers *uniquement* sur les données 2D
+            # de la période d'entraînement de CE pli.
+            
+            # 3a. Rassembler toutes les données 2D d'entraînement de ce pli
+            print("  Ajustement des scalers sur les données d'entraînement...")
+            mega_train_df = pd.concat([
+                frame.loc[train_fold_dates[0]:train_fold_dates[1]] 
+                for frame in clean_frames if not frame.loc[train_fold_dates[0]:train_fold_dates[1]].empty
+            ])
+            
+            if mega_train_df.empty:
+                print(f"  [AVERTISSEMENT] Pli {split_idx} ignoré: aucune donnée d'entraînement dans cette plage de dates.")
                 continue
 
-
+            # 3b. Ajuster les scalers
             scaler_x = StandardScaler()
-            scaler_y = StandardScaler()
+            scaler_y = StandardScaler() 
 
-            X_train_np = X_train.detach().cpu().numpy().reshape(-1, F)
-            X_val_np = X_val.detach().cpu().numpy().reshape(-1, F)
-            X_train_scaled = scaler_x.fit_transform(X_train_np).astype(np.float32).reshape(Ntr, T, F)
-            X_val_scaled = scaler_x.transform(X_val_np).astype(np.float32).reshape(Nval, T, F)
+            scaler_x.fit(mega_train_df[self.feature])
+            scaler_y.fit(mega_train_df[[self.target_feature]])
 
-            y_train_np = y_train.detach().cpu().numpy()
-            y_val_np = y_val.detach().cpu().numpy()
-            y_train_scaled = scaler_y.fit_transform(y_train_np).astype(np.float32)
-            y_val_scaled = scaler_y.transform(y_val_np).astype(np.float32)
+            seq_list_train, targ_list_train = [], []
+            seq_list_val, targ_list_val = [], []
 
-            X_train_scaled_torch = torch.from_numpy(X_train_scaled)
-            y_train_scaled_torch = torch.from_numpy(y_train_scaled)
-            X_val_scaled_torch = torch.from_numpy(X_val_scaled)
-            y_val_scaled_torch = torch.from_numpy(y_val_scaled)
+            for frame in clean_frames:
+                
+                # 4a. Isoler les données 2D de cet actif pour ce pli
+                df_train_asset = frame.loc[train_fold_dates[0]:train_fold_dates[1]]
+                df_val_asset = frame.loc[val_fold_dates[0]:val_fold_dates[1]]
+
+                # 4b. Traiter les données d'entraînement de l'actif
+                if not df_train_asset.empty:
+                    # Scaler les données 2D en utilisant le scaler AJUSTÉ
+                    scaled_features = scaler_x.transform(df_train_asset[self.feature])
+                    scaled_target = scaler_y.transform(df_train_asset[[self.target_feature]])
+                    
+                    # Recréer un DataFrame pour 'make_sequence'
+                    df_train_scaled = pd.DataFrame(
+                        scaled_features, columns=self.feature, index=df_train_asset.index
+                    )
+                    # Important : 'make_sequence' va chercher la cible par son nom
+                    df_train_scaled[self.target_feature] = scaled_target
+                    
+                    # Créer les fenêtres 3D sur les données SCALÉES
+                    s_train, t_train = make_sequence_multi_horizon(
+                        df_train_scaled, self.feature, self.window_size, self.target_feature, self.output_h
+                    )
+                    
+                    if len(s_train) > 0:
+                        seq_list_train.append(s_train)
+                        # NOTE : t_train sera aussi basé sur la cible SCALÉE
+                        # C'est ce que nous voulons.
+                        targ_list_train.append(t_train)
+
+                # 4c. Traiter les données de validation de l'actif
+                if not df_val_asset.empty:
+                    # Scaler les données 2D (TOUJOURS avec .transform() !)
+                    scaled_features = scaler_x.transform(df_val_asset[self.feature])
+                    scaled_target = scaler_y.transform(df_val_asset[[self.target_feature]])
+                    
+                    df_val_scaled = pd.DataFrame(
+                        scaled_features, columns=self.feature, index=df_val_asset.index
+                    )
+                    df_val_scaled[self.target_feature] = scaled_target
+                    
+                    s_val, t_val = make_sequence_multi_horizon(
+                        df_val_scaled, self.feature, self.window_size, self.target_feature, self.output_h
+                    )
+                    
+                    if len(s_val) > 0:
+                        seq_list_val.append(s_val)
+                        targ_list_val.append(t_val)
+
+            # 4d. Empiler toutes les séquences pour ce pli
+            if not seq_list_train or not seq_list_val:
+                print(f"  [AVERTISSEMENT] Pli {split_idx} ignoré: pas assez de données après fenêtrage.")
+                continue
+
+            X_train_scaled_torch = torch.cat(seq_list_train, dim=0).float()
+            y_train_scaled_torch = torch.cat(targ_list_train, dim=0).float()
+            
+            X_val_scaled_torch = torch.cat(seq_list_val, dim=0).float()
+            y_val_scaled_torch = torch.cat(targ_list_val, dim=0).float()
+
+            print(f"  -> trzining tensor: X={X_train_scaled_torch.shape}, y={y_train_scaled_torch.shape}")
+            print(f"  -> val tensor : X={X_val_scaled_torch.shape}, y={y_val_scaled_torch.shape}")
+            
+            Ntr, T, F = X_train_scaled_torch.shape
+            Nval = X_val_scaled_torch.shape[0]
 
 
             train_ds = torch.utils.data.TensorDataset(X_train_scaled_torch.float(), y_train_scaled_torch.float())
             val_ds = torch.utils.data.TensorDataset(X_val_scaled_torch.float(), y_val_scaled_torch.float())
 
-            train_dl = torch.utils.data.DataLoader(train_ds, batch_size=32, shuffle=True)
-            val_dl = torch.utils.data.DataLoader(val_ds, batch_size=32, shuffle=False)
+            use_cuda = torch.cuda.is_available()
+            device    = torch.device("cuda" if use_cuda else "cpu")
+
+            
+            #num_workers = max(2, min(4, (os.cpu_count() or 2)//1))
 
 
+            train_dl = torch.utils.data.DataLoader(train_ds, batch_size=1024, shuffle=True, drop_last=True, num_workers =0, pin_memory=use_cuda)
+            val_dl = torch.utils.data.DataLoader(val_ds, batch_size=1024, shuffle=False, drop_last=False, num_workers =0, pin_memory=use_cuda)
 
 
             model = LSTMModelProba(
@@ -399,13 +525,24 @@ class LSTMPredictorProba:
                     horizon=self.output_h,
                     quantiles=self.quantiles,
                     num_layers=self.num_layers,
-                ).to(self.device)
+                )
+
+            if use_cuda and torch.cuda.device_count() > 1:
+                model = torch.nn.DataParallel(model)   
+            model = model.to(device)
+
+            model = model.to(
+                device)            
             
+
             def criterion(pred, targ):
                 return quantile_loss(pred, targ, quantiles=self.quantiles)
             
-            optimizer = torch.optim.Adam(model.parameters(), lr=self.lr, weight_decay=1e-5)
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=.5, patience=30)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=5e-4)
+            steps_per_epoch = len(train_dl)
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer,
+               max_lr=1e-3, epochs=60, steps_per_epoch=steps_per_epoch,pct_start=0.3,div_factor=25,final_div_factor=100
+            )
 
             best_val_loss_split, patience, bad = float('inf'), 150, 0
             best_state_split = {k: v.cpu() for k, v in model.state_dict().items()}
@@ -414,36 +551,79 @@ class LSTMPredictorProba:
 
 
             """        Entrainement du modele          """
+            amp_enabled = torch.cuda.is_available()
+            scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
+            accum_steps = 2
+            global_step=0
+
+            
             print("Starting training...")
-            for epoch in range(1, self.epochs +1):
+            for epoch in range(1, self.epochs + 1):
                 model.train()
-                running=0.0
-                for seqs, targs in train_dl:
-                    seqs, targs = seqs.to(self.device).float(), targs.to(self.device).float()
-                    optimizer.zero_grad()
-                    outputs = model(seqs)
-                    loss = criterion(outputs, targs)
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
-                    running+=loss.item()*seqs.size(0)
-                
+                train_sum = torch.zeros((), device = device)
+                seen_train =0
+                running = 0.0
+                optimizer.zero_grad(set_to_none=True)
+                for i, (seqs, targs) in enumerate(train_dl, 1):
+                    seqs  = seqs.to(self.device, non_blocking=True).float()
+                    targs = targs.to(self.device, non_blocking=True).float()
+            
+                    
+            
+                    # --- forward + loss en mixed precision si CUDA dispo
+                    with torch.cuda.amp.autocast(enabled=amp_enabled):
+                        outputs = model(seqs)
+                        loss = criterion(outputs, targs) / accum_steps
+            
+                    # --- backward (échelle fp16)
+                    scaler.scale(loss).backward()
 
-                train_loss = running/len(train_ds)
+                    if i % accum_steps == 0:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer.zero_grad(set_to_none=True)
+
+                    train_sum += (loss.detach() * accum_steps) * seqs.size(0)
+                    seen_train += seqs.size(0)
+                    global_step +=1
+                if (i % accum_steps) != 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
+
+                    # --- IMPORTANT: unscale avant clipping, puis clip
+                    #scaler.unscale_(optimizer)
+                    #torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
+                    # --- step via scaler, puis update
+                    #scaler.step(optimizer)
+                    #scaler.update()
+            
+                    #running += loss.item() * seqs.size(0)
+            
+                train_loss = (train_sum / max(1, seen_train)).item()
                 model.eval()
-                v_running=0.0
 
                 with torch.no_grad():
+                    val_sum = torch.zeros((), device = device)
+                    seen_val = 0
                     for vseqs, vtargs in val_dl:
-                        vseqs, vtargs = vseqs.to(self.device).float(), vtargs.to(self.device).float()
-                        voutputs = model(vseqs)
-                        loss = criterion(voutputs, vtargs)
-                        v_running+=loss.item()*vseqs.size(0)
-                val_loss = v_running/len(val_ds)
+                        vseqs  = vseqs.to(self.device, non_blocking=True).float()
+                        vtargs = vtargs.to(self.device, non_blocking=True).float()
+                        with torch.cuda.amp.autocast(enabled=amp_enabled):
+                            voutputs = model(vseqs)
+                            vloss = criterion(voutputs, vtargs)
+                        val_sum  += vloss.detach() * vseqs.size(0)
+                        seen_val += vseqs.size(0)
+                val_loss = (val_sum / max(1, seen_val)).item()    
 
                 scheduler.step(val_loss)
-
+                
                 if val_loss < best_val_loss_split:
                     best_val_loss_split = val_loss
                     bad = 0
@@ -458,7 +638,7 @@ class LSTMPredictorProba:
                 lr_to_plot[epoch-1]=optimizer.param_groups[0]['lr']
                 loss_plot[epoch-1]=train_loss
                 val_plot[epoch-1]=val_loss
-                if (epoch+1) % 5 == 0:
+                if (epoch+1) % 25 == 0:
                     print(f'Epoch [{epoch+1}/{self.epochs}]| Train: {train_loss:.4f} | val: {val_loss:.4f} | LR: {optimizer.param_groups[0]["lr"]:.6f}')
             
             model.load_state_dict(best_state_split)
@@ -548,6 +728,8 @@ class LSTMPredictorProba:
         if best_artifacts is None:
             raise ValueError("Aucun modèle valide n'a été entraîné lors du walk-forward.")
         print('one st au vrai modele')
+
+        
         self.model = LSTMModelProba(
             input_size=len(self.feature),
             hidden_size=self.hidden_size,
