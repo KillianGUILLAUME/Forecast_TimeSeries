@@ -253,11 +253,6 @@ class LSTMPredictorProba:
         else:
             iterable = list(frames)
 
-
-        seq_list: List[torch.Tensor] = []
-        targ_list: List[torch.Tensor] = []
-        indices: List[pd.Index] = []
-
         clean_frames: List[pd.DataFrame] = []
 
         for frame in iterable:
@@ -290,7 +285,19 @@ class LSTMPredictorProba:
             all_dates_set.update(frame.index)
 
         all_unique_sorted_dates = pd.Index(sorted(list(all_dates_set)))
+
+        FINAL_TEST_SIZE = 252
+
+        if len(all_unique_sorted_dates) < FINAL_TEST_SIZE *2:
+            raise ValueError("not enough data for a final test set of size {FINAL_TEST_SIZE}")
         print(f'data goes from {all_unique_sorted_dates.min().date()} to {all_unique_sorted_dates.max().date()} with {len(all_unique_sorted_dates)} unique dates across all assets.')
+
+        dates_for_cv = all_unique_sorted_dates[:-FINAL_TEST_SIZE]
+
+        dates_for_final_test = all_unique_sorted_dates[-FINAL_TEST_SIZE:]
+
+        self.final_test_start_date = dates_for_final_test.min()
+        self.final_test_end_date = dates_for_final_test.max()
 
         n_splits = self.walkforward_splits 
         test_size = self.walkforward_test_size
@@ -298,21 +305,19 @@ class LSTMPredictorProba:
         try:
             tscv = TimeSeriesSplit(n_splits=n_splits, test_size=test_size)
         except ValueError as exc:
-            # Cela peut arriver si test_size est trop grand par rapport au nb de dates
-            raise ValueError(f"Erreur TimeSeriesSplit sur les dates: {exc}")
-        
+            raise ValueError(f"Erreur TimeSeriesSplit sur les dates de CV: {exc}")
         date_splits = []
         # On splitte les *indices* de notre liste de dates
-        for train_idx, val_idx in tscv.split(all_unique_sorted_dates):
+        for train_idx, val_idx in tscv.split(dates_for_cv):
             if len(train_idx) == 0 or len(val_idx) == 0:
                 continue
                 
             # On récupère les dates de début et de fin pour ce pli
-            train_start_date = all_unique_sorted_dates[train_idx[0]]
-            train_end_date = all_unique_sorted_dates[train_idx[-1]]
+            train_start_date = dates_for_cv[train_idx[0]]
+            train_end_date = dates_for_cv[train_idx[-1]]
             
-            val_start_date = all_unique_sorted_dates[val_idx[0]]
-            val_end_date = all_unique_sorted_dates[val_idx[-1]]
+            val_start_date = dates_for_cv[val_idx[0]]
+            val_end_date = dates_for_cv[val_idx[-1]]
             
             train_fold_dates = (train_start_date, train_end_date)
             val_fold_dates = (val_start_date, val_end_date)
@@ -326,79 +331,6 @@ class LSTMPredictorProba:
         for i, (train_d, val_d) in enumerate(date_splits, 1):
             print(f"  Pli {i}: Train [{train_d[0].date()} -> {train_d[1].date()}], Val [{val_d[0].date()} -> {val_d[1].date()}]")
 
-        """
-        # for frame in clean_frames:
-        #     s, t = make_sequence_multi_horizon(
-        #         frame,
-        #         feature=self.feature,
-        #         target_feature=self.target_feature,
-        #         window_size=self.window_size,
-        #         H=self.output_h,
-        #     )
-        #     if len(s) > 0:
-        #         seq_list.append(s)
-        #         targ_list.append(t)
-        #         indices.append(frame.index)
-        # if not seq_list:
-        #     raise ValueError("Aucune séquence générée (données insuffisantes).")
-
-        # sequences = torch.cat(seq_list, dim=0)
-        # targets  = torch.cat(targ_list, dim=0)
-
-        # Overlook of constructed dataset
-
-        # N, T, F = sequences.shape
-        # H = targets.shape[1]
-        # print(f"\n[PREVIEW] sequences: N={N}, T={T}, F={F} | targets: H={H}")
-        # print(f"Features utilisées (ordre): {self.feature}")
-
-        """
-
-        # print("Répartition des fenêtres par actif:")
-        # 1) stats globales par feature (sur toutes les séquences et toutes les étapes)
-
-
-        """
-        with torch.no_grad():
-            feat_mean = sequences.float().mean(dim=(0, 1)).cpu().numpy()
-            feat_std = sequences.float().std(dim=(0, 1)).cpu().numpy()
-        print("\n[Stats globales] mean/std par feature:")
-        try:
-            seq0 = sequences[0].detach().cpu().numpy()  # (T, F)
-            df_seq0 = pd.DataFrame(seq0, columns=self.feature)
-            print("\n[Window #0] premières lignes de la fenêtre (T x F):")
-            with pd.option_context("display.max_columns", None, "display.width", 160):
-                print(df_seq0.head(5))
-        except Exception as e:
-            print(f"[WARN] impossible d'afficher la première fenêtre: {e}")
-
-        # 3) première cible (H) = rendements log cumulés (ou ce que tu prépares dans make_sequence...)
-        try:
-            targ0 = targets[0].detach().cpu().numpy()
-            print("\n[Target #0] (horizon cumulatif):")
-            print(np.round(targ0, 6))
-        except Exception as e:
-            print(f"[WARN] impossible d'afficher la première cible: {e}")
-
-        # --- Création des splits walk-forward -----------------------------
-
-        try:
-            splits = list(
-                progressive_time_series_windows(
-                    sequences,
-                    targets,
-                    n_splits=self.walkforward_splits,
-                    test_size=self.walkforward_test_size,
-                )
-            )
-        except ValueError as exc:
-            raise ValueError("Impossible de générer les splits walk-forward: vérifie la taille de l'échantillon.") from exc
-
-        if not splits:
-            raise ValueError("Impossible de créer des splits walk-forward (données insuffisantes).")"""
-
-        # self.df_index_ = indices[-1] if indices else None
-        # self.walkforward_metrics_.clear()
 
         best_artifacts = None
         global_best_loss = float("inf")
@@ -413,10 +345,6 @@ class LSTMPredictorProba:
             print(f"  Train: {train_fold_dates[0].date()} -> {train_fold_dates[1].date()}")
             print(f"  Val:   {val_fold_dates[0].date()} -> {val_fold_dates[1].date()}")
 
-            # --- ÉTAPE 3 : AJUSTEMENT (FIT) DES SCALERS ---
-            # On ajuste les scalers *uniquement* sur les données 2D
-            # de la période d'entraînement de CE pli.
-            
             # 3a. Rassembler toutes les données 2D d'entraînement de ce pli
             print("  Ajustement des scalers sur les données d'entraînement...")
             mega_train_df = pd.concat([
