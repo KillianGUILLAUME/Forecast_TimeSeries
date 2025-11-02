@@ -51,8 +51,22 @@ def resolve_save_dir(project_name="Forecast") -> Path:
     return save_dir
 
 
+DEFAULT_TRAIN_TICKERS: List[str] = [ "SPY", "ISF.L", "CAC.PA", "EXS1.DE", "IAEX.AS", "1321.T", "XIC.TO", "2800.HK", "STW.AX", "510300.SS",
+                                   "IEAG.L","IEAC.AS","EUNH.DE","CBE0.L","IEGS.L","IGLN.L","SSLN.L","CMOD.L","OILB.L",
+                                   "ASML.AS","SAP.DE","MC.PA","AIR.PA","OR.PA","SAN.PA","RMS.PA","NESN.SW","ROG.SW","NOVN.SW","SHEL.L","BP.L","TTE.PA",
+                                    "QQQ","IWM","VTI","VT","EFA","VEA","EEM","VWO",
+                                    "VNQ",                       # REITs
+                                    "XLK","XLF","XLV","XLE","XLY","XLP","XLI","XLB","XLC","XLU",  # secteurs
+                                    "TLT","IEF","BND","HYG","LQD",  # obligations
+                                    "GLD","SLV","DBC","USO",        # matières premières
+                                    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","BRK-B",
+                                    "EWJ","EWG","EWQ","EWA","EWC","EWH","EWT","EWS","EWZ","EZA",
+                                    "6758.T","7203.T","9984.T",        # Sony, Toyota, SoftBank
+                                    "0700.HK","9988.HK","3690.HK",     # Tencent, Alibaba, Meituan
+                                    "RY.TO","TD.TO","SHOP.TO","ENB.TO","BHP.AX","CBA.AX"# Canada & Australie
+                                   ]
 
-DEFAULT_TRAIN_TICKERS: List[str] = [ "SPY"]#, "ISF.L", "CAC.PA", "EXS1.DE", "IAEX.AS", "1321.T", "XIC.TO", "2800.HK", "STW.AX", "510300.SS"]
+
 FOREX_TICKERS: Dict[str, str] = {
     "EURUSD=X": "FX_EURUSD",
     "GBPUSD=X": "FX_GBPUSD",
@@ -78,20 +92,20 @@ hp = {
     "hidden_size": 48, #64
     "num_layers": 1, #2
     "lr": 1e-3,
-    "epochs": 700, #200
+    "epochs": 3000, #200
     "horizon": 10,
     "residual_boosting": False,
 }
 
-hp_small = {
-    "window_size": 1, #100
-    "hidden_size": 1, #64
-    "num_layers": 1, #2
-    "lr": 1e-3,
-    "epochs": 1, #200
-    "horizon": 10,
-    "residual_boosting": False,
-}
+# hp_small = {
+#     "window_size": 1, #100
+#     "hidden_size": 1, #64
+#     "num_layers": 1, #2
+#     "lr": 1e-3,
+#     "epochs": 1, #200
+#     "horizon": 10,
+#     "residual_boosting": False,
+# }
 
 
 save_dir = resolve_save_dir("Forecast")
@@ -101,11 +115,11 @@ print("Saving to:", save_dir)
 
 
 run_lstm_training(
-    hp=hp_small,
+    hp=hp,
     save_dir=str(save_dir),
     tickers= DEFAULT_TRAIN_TICKERS,
     period = "max",
     interval = "1d",
     plot_training = False,
-    plot_dir  = False
+    plot_dir  = None
 )
