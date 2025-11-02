@@ -1,10 +1,10 @@
 
 {
-  "id": "killianguillaume/lstm-training",
-  "title": "LSTM - Training",
-  "code_file": "train.py",
+  "id": "killianguillaume/forecast-lstm-training",
+  "title": "Forecast LSTM - Training",
+  "code_file": "notebook_train.ipynb",
   "language": "python",
-  "kernel_type": "script",
+  "kernel_type": "notebook",
   "is_private": true,
   "enable_gpu": true,
   "enable_tpu": false,

@@ -1,0 +1,33 @@
+{
+  "created": "2025-10-30T18:57:54.689146",
+  "class": "LSTMPredictorProba",
+  "feature": [
+    "volume_log",
+    "ret",
+    "ret_mean_5",
+    "ret_mean_20",
+    "ret_mean_50",
+    "ret_std_20",
+    "ret_std_50",
+    "price_zscore_20",
+    "RSI_14",
+    "FX_EURUSD_RET",
+    "FX_GBPUSD_RET",
+    "FX_USDJPY_RET"
+  ],
+  "target_feature": "ret",
+  "window_size": 1,
+  "hidden_size": 1,
+  "num_layers": 1,
+  "horizon": 10,
+  "quantiles": [
+    0.025,
+    0.5,
+    0.975
+  ],
+  "input_size": 12,
+  "use_residual_boosting": false,
+  "boosting_params": {},
+  "boost_feature_dim": null,
+  "residual_models_file": null
+}
