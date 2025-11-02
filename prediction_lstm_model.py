@@ -1,4 +1,6 @@
 #prediction_lstm_model.py
+import time
+
 
 import torch
 import torch.nn as nn
@@ -20,6 +22,13 @@ import re
 import os, json, pickle
 from datetime import datetime
 
+
+def _default_plots_dir():
+    base = Path("/kaggle/working") if Path("/kaggle/working").exists() else Path.cwd()
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    d = base / "Forecast" / "artifacts" / "plots" / ts
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 
@@ -235,7 +244,15 @@ class LSTMPredictorProba:
         self.best_split_index_: Optional[int] = None
         self.X_test_scaled_torch: Optional[torch.Tensor] = None
         self.y_test_last: Optional[torch.Tensor] = None
-        self.plot_training = plot_training
+        if plot_dir in (None, False):
+            self.plot_dir = None
+        elif plot_dir is True:
+            self.plot_dir = _default_plots_dir()
+        elif isinstance(plot_dir, (str, Path)):
+            self.plot_dir = Path(plot_dir)
+            self.plot_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            raise TypeError(f"plot_dir doit être None/False/True/str/Path, reçu {type(plot_dir).__name__}")
         self.plot_dir = None
         self.use_residual_boosting = residual_boosting
         self.boosting_params = dict(boosting_params or {})

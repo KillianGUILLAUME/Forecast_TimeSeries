@@ -1,7 +1,16 @@
-import os, sys
+import os, sys, subprocess
+
+from typing import List, Dict
+
+CODE_DIR = "/kaggle/working/code"
+subprocess.run(["rm", "-rf", CODE_DIR])
+subprocess.run(["git", "clone", "https://github.com/KillianGUILLAUME/Forecast_TimeSeries.git", CODE_DIR], check=True)
+
+# 2) Rendre importable et, si besoin, se placer à la racine
+sys.path.insert(0, CODE_DIR)
+os.chdir(CODE_DIR)
+
 print("CWD:", os.getcwd(), "\nFILES:", os.listdir())
-if os.getcwd() not in sys.path:
-    sys.path.insert(0, os.getcwd())
 
 
 # --- Bootstrap Kaggle/local ---
