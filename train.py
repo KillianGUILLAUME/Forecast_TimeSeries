@@ -35,6 +35,10 @@ if str(Path.cwd()) not in sys.path:
     sys.path.insert(0, str(Path.cwd()))
 
 
+import importlib, inspect, main
+print(">>> main chargé depuis:", main.__file__)
+print(">>> signature:", inspect.signature(main.run_lstm_training))
+
 
 from main import run_lstm_training
 
@@ -122,5 +126,5 @@ run_lstm_training(
     interval = "1d",
     plot_training = False,
     plot_dir  = None,
-    walkforward_splits = 2
+    # walkforward_splits = 2
 )

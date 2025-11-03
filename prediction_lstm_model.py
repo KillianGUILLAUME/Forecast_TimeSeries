@@ -211,7 +211,7 @@ class LSTMModelProba(nn.Module):
 
 class LSTMPredictorProba:
     def __init__(self, feature: List[str], target_feature :str, window_size: int=10, hidden_size: int=50, horizon : int = 10, num_layers: int=3, lr: float=0.001, epochs: int=1000,
-                 *, plot_training: bool = False, plot_dir: Optional[Union[str, os.PathLike[str]]] = None, walkforward_splits: int=5, walkforward_test_size: Optional[int]= None,
+                 *, plot_training: bool = False, plot_dir: Optional[Union[str, os.PathLike[str]]] = None, walkforward_splits: int=2, walkforward_test_size: Optional[int]= None,
                  residual_boosting: bool = False, boosting_params: Optional[Dict[str, Any]] = None):
         unique_features = []
         for name in feature:
