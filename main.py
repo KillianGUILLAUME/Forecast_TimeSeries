@@ -580,6 +580,7 @@ def run_prediction():
             tickers=tickers,
             period=period,
             interval=interval,
+            walkforward_splits = 2,
         )
 
 
