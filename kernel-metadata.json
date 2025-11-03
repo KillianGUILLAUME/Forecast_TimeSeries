@@ -1,7 +1,7 @@
 
 {
-  "id": "killianguillaume/lstm-training_launch_v1_2025_11_03",
-  "title": "lstm_launch_v1_2025_11_03",
+  "id": "killianguillaume/lstm-training-v1-2025-11-03",
+  "title": "lstm-training-v1-2025-11-03",
   "code_file": "train.py",
   "language": "python",
   "kernel_type": "script",
