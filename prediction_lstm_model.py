@@ -320,7 +320,7 @@ class LSTMPredictorProba:
         test_size = self.walkforward_test_size
 
         try:
-            tscv = TimeSeriesSplit(n_splits=n_splits, test_size=test_size)
+            tscv = TimeSeriesSplit(n_splits=2, test_size=test_size)
         except ValueError as exc:
             raise ValueError(f"Erreur TimeSeriesSplit sur les dates de CV: {exc}")
         date_splits = []
