@@ -426,7 +426,8 @@ def run_lstm_training(
     period: str = "max",
     interval: str = "1d",
     plot_training: bool = False,
-    plot_dir: Optional[str] = None,):
+    plot_dir: Optional[str] = None,
+    walkforward_splits = 2):
 
     from prediction_lstm_model import LSTMPredictorProba
 
@@ -479,6 +480,7 @@ def run_lstm_training(
         plot_dir=plot_dir,
         residual_boosting=residual_boosting,
         boosting_params=boosting_params or None,
+        walkforward_splits = walkforward_splits
         )
     print('init du modele ok')
 

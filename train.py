@@ -66,7 +66,7 @@ DEFAULT_TRAIN_TICKERS: List[str] = [ "SPY", "ISF.L", "CAC.PA", "EXS1.DE", "IAEX.
                                     "RY.TO","TD.TO","SHOP.TO","ENB.TO","BHP.AX","CBA.AX"# Canada & Australie
                                    ]
 
-
+DEFAULT_TRAIN_TICKERS: List[str] = [ "SPY"]
 FOREX_TICKERS: Dict[str, str] = {
     "EURUSD=X": "FX_EURUSD",
     "GBPUSD=X": "FX_GBPUSD",
@@ -97,15 +97,15 @@ hp = {
     "residual_boosting": False,
 }
 
-# hp_small = {
-#     "window_size": 1, #100
-#     "hidden_size": 1, #64
-#     "num_layers": 1, #2
-#     "lr": 1e-3,
-#     "epochs": 1, #200
-#     "horizon": 10,
-#     "residual_boosting": False,
-# }
+hp_small = {
+    "window_size": 1, #100
+    "hidden_size": 1, #64
+    "num_layers": 1, #2
+    "lr": 1e-3,
+    "epochs": 1, #200
+    "horizon": 10,
+    "residual_boosting": False,
+}
 
 
 save_dir = resolve_save_dir("Forecast")
@@ -121,5 +121,6 @@ run_lstm_training(
     period = "max",
     interval = "1d",
     plot_training = False,
-    plot_dir  = None
+    plot_dir  = None,
+    walkforward_splits = 2
 )
