@@ -3,6 +3,17 @@ import threading
 import numpy as np
 import pandas as pd
 
+import sys
+import os, json
+from typing import Dict, List, Optional
+
+from pathlib import Path
+
+
+from etf_collector import EuropeanETFCollector
+from etf_visualizer import ETFVisualizer
+
+
 """
 Script principal pour l'analyse et la visualisation des ETF européens
 
@@ -12,13 +23,7 @@ Architecture:
 3. main.py -> Orchestration (ce fichier)
 """
 
-from etf_collector import EuropeanETFCollector
-from etf_visualizer import ETFVisualizer
-
-import sys
-import os, json
-from typing import Dict, List, Optional
-
+from services.model_registry import register_model_dir, resolve_latest_model_dir
 
 
 
@@ -372,8 +377,15 @@ def run_lstm_prediction(collector : EuropeanETFCollector, ticker: str, hp: Dict,
         )
 
     if not load_dir:
-        print("Pour l'action 'predict', le répertoire de chargement doit être spécifié via LSTM_LOAD_DIR.")
-        sys.exit(1)
+        latest = resolve_latest_model_dir()
+        if latest is None:
+            print(
+                "Aucun modèle sauvegardé trouvé dans le dossier 'results'. "
+                "Veuillez spécifier LSTM_LOAD_DIR."
+            )
+            sys.exit(1)
+        load_dir = str(latest)
+        print(f"Utilisation du modèle sauvegardé le plus récent: {load_dir}")
     if not ticker:
         print("Pour l'action 'predict', le ticker doit être spécifié via LSTM_TICKER.")
         sys.exit(1)
@@ -488,12 +500,15 @@ def run_lstm_training(
             "LightGBM residual boosting activé avec paramètres:",
             {k: boosting_params.get(k) for k in sorted(boosting_params)},
         )
-    print("Démarrage de l'entraînement...")
+    print("Début 'entraînement")
     predictor.fit(datasets)
-    print('on a fini')
-    os.makedirs(save_dir, exist_ok=True)
-    predictor.save(save_dir)
-    print("✅ Entraînement terminé et modèle sauvegardé.")
+    print('entrainement terminé')
+    save_path = Path(save_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
+    predictor.save(str(save_path))
+    register_model_dir(save_path)
+
+    print("Entraînement terminé et modèle sauvegardé.")
     collector = EuropeanETFCollector()
     run_lstm_prediction(collector, datasets[0][0], hp, save_dir)
 

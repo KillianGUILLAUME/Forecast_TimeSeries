@@ -1,5 +1,5 @@
 {
-  "created": "2025-10-30T18:57:54.689146",
+  "created": "2025-11-03T21:57:12.898335",
   "class": "LSTMPredictorProba",
   "feature": [
     "volume_log",
@@ -16,8 +16,8 @@
     "FX_USDJPY_RET"
   ],
   "target_feature": "ret",
-  "window_size": 1,
-  "hidden_size": 1,
+  "window_size": 60,
+  "hidden_size": 48,
   "num_layers": 1,
   "horizon": 10,
   "quantiles": [

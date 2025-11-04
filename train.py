@@ -4,7 +4,8 @@ from typing import List, Dict
 
 CODE_DIR = "/kaggle/working/code"
 subprocess.run(["rm", "-rf", CODE_DIR])
-subprocess.run(["git", "clone", "https://github.com/KillianGUILLAUME/Forecast_TimeSeries.git", CODE_DIR], check=True)
+subprocess.run(["git", "clone", "--branch", "dev/notebook_train_lstm", "--depth", "1",
+                "https://github.com/KillianGUILLAUME/Forecast_TimeSeries.git", CODE_DIR], check=True)
 
 # 2) Rendre importable et, si besoin, se placer à la racine
 sys.path.insert(0, CODE_DIR)
@@ -34,10 +35,6 @@ print("CUDA:", torch.cuda.is_available())
 if str(Path.cwd()) not in sys.path:
     sys.path.insert(0, str(Path.cwd()))
 
-
-import importlib, inspect, main
-print(">>> main chargé depuis:", main.__file__)
-print(">>> signature:", inspect.signature(main.run_lstm_training))
 
 
 from main import run_lstm_training
@@ -70,7 +67,6 @@ DEFAULT_TRAIN_TICKERS: List[str] = [ "SPY", "ISF.L", "CAC.PA", "EXS1.DE", "IAEX.
                                     "RY.TO","TD.TO","SHOP.TO","ENB.TO","BHP.AX","CBA.AX"# Canada & Australie
                                    ]
 
-DEFAULT_TRAIN_TICKERS: List[str] = [ "SPY"]
 FOREX_TICKERS: Dict[str, str] = {
     "EURUSD=X": "FX_EURUSD",
     "GBPUSD=X": "FX_GBPUSD",
@@ -101,15 +97,15 @@ hp = {
     "residual_boosting": False,
 }
 
-hp_small = {
-    "window_size": 1, #100
-    "hidden_size": 1, #64
-    "num_layers": 1, #2
-    "lr": 1e-3,
-    "epochs": 1, #200
-    "horizon": 10,
-    "residual_boosting": False,
-}
+# hp_small = {
+#     "window_size": 1, #100
+#     "hidden_size": 1, #64
+#     "num_layers": 1, #2
+#     "lr": 1e-3,
+#     "epochs": 1, #200
+#     "horizon": 10,
+#     "residual_boosting": False,
+# }
 
 
 save_dir = resolve_save_dir("Forecast")

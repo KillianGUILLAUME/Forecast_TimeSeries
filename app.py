@@ -1,4 +1,7 @@
-"""Entry point for the QuantIA Streamlit dashboard."""
+"""Entry point for the QuantIA Streamlit dashboard.
+
+enter python -m streamlit run app.py in the terminal to start using the app
+"""
 
 from __future__ import annotations
 

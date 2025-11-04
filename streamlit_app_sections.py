@@ -26,7 +26,11 @@ from etf_visualizer import ETFVisualizer
 from main import DEFAULT_LSTM_HP, run_lstm_training
 from prediction_lstm_model import LSTMPredictorProba
 from services.genai_service import fetch_economic_answer
-
+from services.model_registry import (
+    get_models_root,
+    resolve_latest_model_dir,
+    suggest_model_dir,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 LOGO_PATH = APP_DIR / "logo_QuantIA.png"
@@ -675,9 +679,20 @@ def render_lstm_prediction() -> None:
     st.session_state["prediction_last_symbol"] = selected_symbol
     st.write(f"Actif sélectionné : **{selected_symbol}**")
 
+
+    latest_model_dir = resolve_latest_model_dir()
+    default_load_dir = str(latest_model_dir) if latest_model_dir else str(get_models_root())
+
     with st.form("prediction_form"):
         st.text_input("Ticker sélectionné", value=selected_symbol, disabled=True)
-        load_dir = st.text_input("Répertoire du modèle sauvegardé", value="checkpoints")
+        load_dir = st.text_input(
+            "Répertoire du modèle sauvegardé",
+            value=default_load_dir,
+            help=(
+                "Le dossier doit contenir les fichiers générés par la sauvegarde du "
+                "modèle (meta.json, model.pt, scaler_*.pkl)."
+            ),
+        )
         period = st.selectbox("Période de téléchargement", ["1y", "5y", "10y", "max"], index=1)
         interval = st.selectbox("Intervalle", ["1d", "1wk", "1mo"], index=0)
         requested_horizon = st.number_input(
@@ -702,8 +717,12 @@ def render_lstm_prediction() -> None:
         return
     requested_horizon = int(requested_horizon)
     try:
-        predictor = LSTMPredictorProba.load(load_dir)
+        last_model_kaggle = "https://github.com/KillianGUILLAUME/Forecast_TimeSeries/blob/dev/notebook_train_lstm/models/Forecast/artifacts/models/20251103-211112"
+        print('on est ici')
+        predictor = LSTMPredictorProba.load(last_model_kaggle)
+        print('par la')
     except Exception as exc:  # pragma: no cover - runtime safety
+        print('aha')
         st.error(f"Impossible de charger le modèle: {exc}")
         return
     
@@ -776,12 +795,18 @@ def render_lstm_training() -> None:
     boost_defaults = defaults.get("boosting_params",{})
     default_tickers = ", ".join(resolve_training_universe([])[:5])
 
+    suggested_save_dir = str(suggest_model_dir())
+
     with st.form("training_form"):
         tickers_text = st.text_input(
             "Tickers pour l'entraînement (séparés par des virgules)",
             value=default_tickers,
         )
-        save_dir = st.text_input("Répertoire de sauvegarde", value="checkpoints/experiment")
+        save_dir = st.text_input(
+            "Répertoire de sauvegarde",
+            value=suggested_save_dir,
+            help="Le modèle et ses scalers seront enregistrés dans ce dossier.",
+        )
         period = st.selectbox("Période", ["1y", "5y", "10y", "max"], index=1)
         interval = st.selectbox("Intervalle", ["1d", "1wk", "1mo"], index=0)
         window_size = st.number_input("Fenêtre temporelle", min_value=1, max_value=400, value=int(defaults["window_size"]))
@@ -1115,7 +1140,7 @@ def render_home_page() -> None:
         """
         ### Conseils d'utilisation
         * Pour tirer parti du cache, laissez l'application ouverte pendant vos explorations : les téléchargements de données seront réutilisés.
-        * Les formulaires de prédiction et d'entraînement demandent un modèle LSTM préalablement sauvegardé dans le répertoire `checkpoints`.
+        * Les formulaires de prédiction et d'entraînement réutilisent automatiquement le dernier modèle sauvegardé dans le dossier `results`.
         * L'assistant économique nécessite une configuration valide de l'API Mistral AI dans le service `services/genai_service.py`.
         """
     )

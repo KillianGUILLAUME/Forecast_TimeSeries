@@ -1,0 +1,5 @@
+# Ignore saved model artifacts and auxiliary files.
+*
+
+# Keep the ignore file itself under version control.
+!.gitignore
