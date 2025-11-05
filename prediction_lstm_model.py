@@ -48,8 +48,8 @@ def make_sequence_multi_horizon(
 
         return torch.tensor(sequences), torch.tensor(targets)
     else:
-        Xv = df[feature].values
-        yv = df[target_feature].values
+        Xv = df[feature].to_numpy(dtype=np.float32, copy=False)
+        yv = df[target_feature].to_numpy(dtype=np.float32, copy=False)
         sequences, targets = [], []
         for i in range(len(df) - window_size - H + 1):
             sequences.append(Xv[i:i + window_size])
@@ -595,12 +595,12 @@ class LSTMPredictorProba:
                     print(f'Epoch [{epoch+1}/{self.epochs}]| Train: {train_loss:.4f} | val: {val_loss:.4f} | LR: {optimizer.param_groups[0]["lr"]:.6f}')
             
             model.load_state_dict(best_state_split)
-            del best_state_split  # ← Libère la RAM
+            
             torch.cuda.empty_cache()
             model.eval()
             train_preds_scaled_list: List[np.ndarray] = []
             train_y_scaled_list: List[np.ndarray] = []
-            train_eval_dl = torch.utils.data.DataLoader(train_ds, batch_size=256, shuffle=False)
+            train_eval_dl = torch.utils.data.DataLoader(train_ds, batch_size=128, shuffle=False)
             with torch.no_grad():
                 for xb, yb in train_eval_dl:
                     qb = model(xb.to(self.device).float()).cpu().numpy()
@@ -660,17 +660,21 @@ class LSTMPredictorProba:
                 "Validation Winkler score:",
                 " ".join(f"{c:.3f}" for c in metrics["interval_score"]),
             )
-
+            X_train_np = X_train_scaled_torch.cpu().numpy()
+            y_train_np = y_train_scaled_torch.cpu().numpy()
+            X_val_np = X_val_scaled_torch.cpu().numpy()
+            y_val_np = y_val_scaled_torch.cpu().numpy()
+            del X_train_scaled_torch, y_train_scaled_torch
             if best_val_loss_split < global_best_loss:
                 global_best_loss = best_val_loss_split
                 best_artifacts = {
                     "state": copy.deepcopy(best_state_split),
-                    "scaler_x": copy.deepcopy(scaler_x),
-                    "scaler_y": copy.deepcopy(scaler_y),
-                    "X_val_scaled": X_val_scaled_torch.clone(),
-                    "y_val_scaled": y_val_scaled_torch.clone(),
-                    "X_train_scaled": X_train_scaled_torch.clone(),
-                    "y_train_scaled": y_train_scaled_torch.clone(),
+                    "scaler_x": scaler_x,
+                    "scaler_y": scaler_y,
+                    "X_val_scaled": X_val_np,
+                    "y_val_scaled": y_val_np,
+                    "X_train_scaled": X_train_np,
+                    "y_train_scaled": y_train_np,
                     "train_q_scaled": train_q_scaled.copy(),
                     "train_y_scaled": train_y_scaled.copy(),                    
                     "lr_history": lr_to_plot.copy(),
@@ -678,7 +682,7 @@ class LSTMPredictorProba:
                     "val_history": val_plot.copy(),
                     "split": split_idx,
                 }
-
+        del best_state_split  
         if best_artifacts is None:
             raise ValueError("Aucun modèle valide n'a été entraîné lors du walk-forward.")
         print('one st au vrai modele')

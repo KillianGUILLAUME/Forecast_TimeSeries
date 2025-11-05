@@ -491,7 +491,6 @@ def run_lstm_training(
         plot_dir=plot_dir,
         residual_boosting=residual_boosting,
         boosting_params=boosting_params or None,
-        walkforward_splits = 2
         )
     print('init du modele ok')
 
@@ -594,7 +593,6 @@ def run_prediction():
             tickers=tickers,
             period=period,
             interval=interval,
-            walkforward_splits = 2,
         )
 
 
