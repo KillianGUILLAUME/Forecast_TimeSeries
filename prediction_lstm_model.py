@@ -462,8 +462,8 @@ class LSTMPredictorProba:
             available_ram_gb = psutil.virtual_memory().available / (1024**3)
             use_pin_memory = available_ram_gb > 10
 
-            train_dl = torch.utils.data.DataLoader(train_ds, batch_size=512, shuffle=True, drop_last=True, num_workers =2, pin_memory=use_pin_memory)
-            val_dl = torch.utils.data.DataLoader(val_ds, batch_size=512, shuffle=False, drop_last=False, num_workers =2, pin_memory=use_pin_memory)
+            train_dl = torch.utils.data.DataLoader(train_ds, batch_size=2048, shuffle=True, drop_last=True, num_workers =2, pin_memory=use_pin_memory)
+            val_dl = torch.utils.data.DataLoader(val_ds, batch_size=2048, shuffle=False, drop_last=False, num_workers =2, pin_memory=use_pin_memory)
 
 
             model = LSTMModelProba(
@@ -503,8 +503,11 @@ class LSTMPredictorProba:
             def log_cuda_mem(tag=""):
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
+                    ram_used = psutil.virtual_memory().used / 1e9
+                    ram_percent = psutil.virtual_memory().percent
                     print(f"[{tag}] alloc={torch.cuda.memory_allocated()/1e9:.2f} GB | "
-                        f"reserved={torch.cuda.memory_reserved()/1e9:.2f} GB")
+                        f"reserved={torch.cuda.memory_reserved()/1e9:.2f} GB"
+                        f"RAM: {ram_used:.2f} GB ({ram_percent:.1f}%)")
 
             
             print("Starting training...")
@@ -592,7 +595,8 @@ class LSTMPredictorProba:
                     print(f'Epoch [{epoch+1}/{self.epochs}]| Train: {train_loss:.4f} | val: {val_loss:.4f} | LR: {optimizer.param_groups[0]["lr"]:.6f}')
             
             model.load_state_dict(best_state_split)
-
+            del best_state_split  # ← Libère la RAM
+            torch.cuda.empty_cache()
             model.eval()
             train_preds_scaled_list: List[np.ndarray] = []
             train_y_scaled_list: List[np.ndarray] = []
