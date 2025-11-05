@@ -1,4 +1,7 @@
-"""Entry point for the QuantIA Streamlit dashboard."""
+"""Entry point for the QuantIA Streamlit dashboard.
+
+enter python -m streamlit run Home.py in the terminal to start using the app
+"""
 
 from __future__ import annotations
 
@@ -20,7 +23,12 @@ st.set_page_config(
 
 def main() -> None:
     init_session_state()
-    show_header()
+    show_header(
+        page_title="Home page QuantIA",
+        page_subtitle=(
+            "Explore stock actions, ETF, predict there prices and interact with an IA economic assistant."
+        ),
+    )
     render_home_page()
 
 if __name__ == "__main__":

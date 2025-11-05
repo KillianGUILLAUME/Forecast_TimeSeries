@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.git/
+*.png
+*.jpg
+*.jpeg
+*.csv
+*.parquet
+*.pt
+*.pkl
+!*.py
+!notebook_train.ipynb
+!kernel-metadata.json
+!forecast_mp/
+!forecast_mp/*.py
+!forecast_mp/__init__.py
