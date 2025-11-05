@@ -28,7 +28,6 @@ from prediction_lstm_model import LSTMPredictorProba
 from services.genai_service import fetch_economic_answer
 from services.model_registry import (
     get_models_root,
-    resolve_latest_model_dir,
     suggest_model_dir,
 )
 
@@ -505,7 +504,7 @@ def make_prediction_plot(
             x=df_pred.index,
             y=df_pred["adj_close_P50"],
             mode="lines",
-            line=dict(color="#1E2749", dash="dash", width=2),
+            line=dict(color="#4FC3F7", dash="dash", width=2),
             name="Médiane",
         )
     )
@@ -527,17 +526,21 @@ def compute_future_index(last_index: pd.Timestamp, horizon: int) -> pd.DatetimeI
     return pd.bdate_range(start=start, periods=horizon)
 
 
-def show_header() -> None:
+def show_header(page_title: Optional[str] = None, page_subtitle: Optional[str] = None) -> None:
+    """Render the shared header with brand identity and a page-specific title."""
+
+    default_page_title = "Dashboard & Economic IA"
+    default_subtitle = (
+        "Analyse stocks, bonds and ETF, start prediction with a LSTM model ask an economic assistant in the same place !"
+    )
     col_logo, col_title = st.columns([1, 4])
     with col_logo:
         if LOGO_PATH.exists():
             st.image(str(LOGO_PATH), width=120)
     with col_title:
-        st.title("QuantIA — Analyse ETF & Prédictions LSTM")
-        st.caption(
-            "Interface web interactive propulsée par Streamlit pour explorer les ETF européens,"
-            " entraîner un modèle LSTM probabiliste et interroger l'IA pour des questions économiques ou d'analyse financières."
-        )
+        st.markdown("#### QuantIA — Financial AI")
+        st.title(page_title or default_page_title)
+        st.markdown(page_subtitle or default_subtitle)
 
 
 def render_summary_metrics(summary: pd.DataFrame) -> None:
@@ -560,7 +563,7 @@ def render_summary_metrics(summary: pd.DataFrame) -> None:
 
 def render_visualisations(summary: pd.DataFrame, prices: Dict[str, pd.DataFrame], log_scale: bool) -> None:
     if not prices:
-        st.warning("Sélectionnez au moins un ETF pour afficher les graphiques.")
+        st.warning("Sélectionnez au moins un actif pour afficher les graphiques.")
         return
 
     viz_tab, compare_tab, dist_tab, corr_tab, risk_tab, dash_tab = st.tabs(
@@ -575,7 +578,7 @@ def render_visualisations(summary: pd.DataFrame, prices: Dict[str, pd.DataFrame]
     )
 
     with viz_tab:
-        target = st.selectbox("Choisir l'ETF à visualiser", list(prices.keys()), key="single_ticker")
+        target = st.selectbox("Choisir l'actif à visualiser", list(prices.keys()), key="single_ticker")
         fig = make_single_candlestick(prices[target], target, log_scale=log_scale)
         st.plotly_chart(fig, use_container_width=True)
 
@@ -590,7 +593,7 @@ def render_visualisations(summary: pd.DataFrame, prices: Dict[str, pd.DataFrame]
     with corr_tab:
         fig = make_correlation_matrix(prices)
         if fig is None:
-            st.info("Pas assez d'ETF pour calculer une corrélation.")
+            st.info("Pas assez d'actif pour calculer une corrélation.")
         else:
             st.plotly_chart(fig, use_container_width=True)
 
@@ -680,14 +683,15 @@ def render_lstm_prediction() -> None:
     st.write(f"Actif sélectionné : **{selected_symbol}**")
 
 
-    latest_model_dir = resolve_latest_model_dir()
-    default_load_dir = str(latest_model_dir) if latest_model_dir else str(get_models_root())
+    # latest_model_dir = resolve_latest_model_dir()
+    # default_load_dir = str(latest_model_dir) if latest_model_dir else str(get_models_root())
+    model = suggest_model_dir()
 
     with st.form("prediction_form"):
         st.text_input("Ticker sélectionné", value=selected_symbol, disabled=True)
         load_dir = st.text_input(
             "Répertoire du modèle sauvegardé",
-            value=default_load_dir,
+            value=model,
             help=(
                 "Le dossier doit contenir les fichiers générés par la sauvegarde du "
                 "modèle (meta.json, model.pt, scaler_*.pkl)."
@@ -717,9 +721,8 @@ def render_lstm_prediction() -> None:
         return
     requested_horizon = int(requested_horizon)
     try:
-        last_model_kaggle = "https://github.com/KillianGUILLAUME/Forecast_TimeSeries/blob/dev/notebook_train_lstm/models/Forecast/artifacts/models/20251103-211112"
-        print('on est ici')
-        predictor = LSTMPredictorProba.load(last_model_kaggle)
+        model = suggest_model_dir()
+        predictor = LSTMPredictorProba.load(model)
         print('par la')
     except Exception as exc:  # pragma: no cover - runtime safety
         print('aha')
@@ -954,7 +957,7 @@ def render_economic_assistant() -> None:
 
 
 def render_etf_analysis_page() -> None:
-    st.header("Analyse des ETF européens")
+    st.header("Analyse des actifs")
 
     base_tickers = EuropeanETFCollector().get_tickers()
 
@@ -1128,13 +1131,13 @@ def render_home_page() -> None:
 
     st.markdown("### Accès rapide")
     try:
-        st.page_link("pages/analyse_graph_app.py", label="📊 Analyse ETF")
-        st.page_link("pages/prediction_app.py", label="🧠 Prédictions & Entraînement")
-        st.page_link("pages/genai_app.py", label="⚙️ MagistrAssistant")
+        st.page_link("pages/1_Graphics_Analysis.py", label="📊 Analyse ETF")
+        st.page_link("pages/2_MagistrAssistant.py", label="🧠 Prédictions & Entraînement")
+        st.page_link("pages/3_Prediction_&_Training.py", label="⚙️ MagistrAssistant")
     except AttributeError:
-        st.markdown("- 📊 [Analyse ETF](pages/analyse_graph_app.py)")
-        st.markdown("- 🧠 [Prédictions & Entraînement](pages/prediction_app.py)")
-        st.markdown("- ⚙️ [MagistrAssistant](pages/genai_app.py)")
+        st.markdown("- 📊 [Analyse ETF](pages/1_Graphics_Analysis.py)")
+        st.markdown("- 🧠 [Prédictions & Entraînement](pages/2_MagistrAssistant.py)")
+        st.markdown("- ⚙️ [MagistrAssistant](pages/3_Prediction_&_Training.py)")
 
     st.markdown(
         """

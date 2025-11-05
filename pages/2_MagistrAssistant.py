@@ -20,7 +20,10 @@ from streamlit_app_sections import init_session_state, render_assistant_page, sh
 
 def main() -> None:
     init_session_state()
-    show_header()
+    show_header(
+        page_title="MagistrAssistant — IA economic assistant",
+        page_subtitle="Ask Mistral AI model to obtain economic informations.",
+    )
     render_assistant_page()
 
 if __name__ == "__main__":

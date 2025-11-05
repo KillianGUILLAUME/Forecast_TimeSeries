@@ -6,7 +6,7 @@ from typing import Iterable, Optional
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_MODELS_ROOT = _PROJECT_ROOT / "results"
+_MODELS_ROOT = _PROJECT_ROOT / "models"
 
 
 def get_models_root() -> Path:
@@ -20,48 +20,17 @@ def get_models_root() -> Path:
     return _MODELS_ROOT
 
 
-def suggest_model_dir(prefix: str = "run") -> Path:
-    """Return a timestamped directory inside :func:'get_models_root'.
-
-    The directory is not created automatically because Streamlit forms allow
-    users to edit the suggested value before launching the training. The caller
-    is expected to create the directory when the training actually starts.
-    """
-
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return get_models_root() / f"{prefix}-{ts}"
-
-
-def _iter_candidate_directories(root: Path) -> Iterable[Path]:
-    for entry in root.iterdir():
-        if entry.is_dir():
-            yield entry
-
-
-def resolve_latest_model_dir() -> Optional[Path]:
-    """Return the most recent model directory available for inference.
-
-    The helper looks for directories containing a meta.json file, which is
-    produced by :meth:prediction_lstm_model.LSTMPredictorProba.save. When no
-    such directory exists we fallback to returning the results directory if
-    it contains a model.pt file so legacy single-file checkpoints remain
-    usable.
-    """
-
-    root = get_models_root()
-    candidates = []
-    for entry in _iter_candidate_directories(root):
-        if (entry / "meta.json").exists():
-            candidates.append(entry)
-    if candidates:
-        candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-        return candidates[0]
-
-    legacy_checkpoint = root / "model.pt"
-    if legacy_checkpoint.exists():
-        return root
-
-    return None
+def suggest_model_dir() -> Path:
+    base_model = get_models_root()
+    base = base_model / "Forecast" / "artifacts" / "models"
+    latest = base / "latest"
+    if latest.exists():
+        return latest
+    runs = [p for p in base.iterdir() if p.is_dir()]
+    if not runs:
+        raise FileNotFoundError(f"Aucun run trouvé dans {base}")
+    runs.sort(key=lambda p: p.name)
+    return runs[-1]
 
 
 def register_model_dir(path: Path) -> None:

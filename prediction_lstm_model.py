@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from sklearn.model_selection import TimeSeriesSplit
+import math
 
 from lightgbm import LGBMRegressor
 
@@ -324,7 +325,7 @@ class LSTMPredictorProba:
         except ValueError as exc:
             raise ValueError(f"Erreur TimeSeriesSplit sur les dates de CV: {exc}")
         date_splits = []
-        # On splitte les *indices* de notre liste de dates
+        # On splitte les indices de notre liste de dates
         for train_idx, val_idx in tscv.split(dates_for_cv):
             if len(train_idx) == 0 or len(val_idx) == 0:
                 continue
@@ -484,9 +485,13 @@ class LSTMPredictorProba:
                 return quantile_loss(pred, targ, quantiles=self.quantiles)
             
             optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=5e-4)
+            accum_steps = 2
+            steps_per_epoch = math.ceil(len(train_dl) / accum_steps)
+            total_steps = self.epochs * steps_per_epoch
+
             steps_per_epoch = len(train_dl)
-            scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer,
-               max_lr=1e-3, epochs=60, steps_per_epoch=steps_per_epoch,pct_start=0.3,div_factor=25,final_div_factor=100
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer, max_lr=1e-3, total_steps=total_steps, pct_start=0.3,div_factor=25,final_div_factor=100
             )
 
             best_val_loss_split, patience, bad = float('inf'), 150, 0
@@ -499,7 +504,6 @@ class LSTMPredictorProba:
             amp_enabled = torch.cuda.is_available()
             scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
-            accum_steps = 2
             global_step=0
 
             
@@ -530,6 +534,7 @@ class LSTMPredictorProba:
                         scaler.step(optimizer)
                         scaler.update()
                         optimizer.zero_grad(set_to_none=True)
+                        scheduler.step()
 
                     train_sum += (loss.detach() * accum_steps) * seqs.size(0)
                     seen_train += seqs.size(0)
@@ -540,6 +545,7 @@ class LSTMPredictorProba:
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
+                    scheduler.step()
 
                 train_loss = (train_sum / max(1, seen_train)).item()
                 model.eval()

@@ -23,7 +23,7 @@ Architecture:
 3. main.py -> Orchestration (ce fichier)
 """
 
-from services.model_registry import register_model_dir, resolve_latest_model_dir
+from services.model_registry import register_model_dir
 
 
 

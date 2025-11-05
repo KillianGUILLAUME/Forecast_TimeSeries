@@ -21,7 +21,10 @@ from streamlit_app_sections import init_session_state, render_prediction_page, s
 
 def main() -> None:
     init_session_state()
-    show_header()
+    show_header(
+        page_title="Prediction LSTM & training",
+        page_subtitle="Start a prediction with a preload model or create yours.",
+    )
     render_prediction_page()
 
 if __name__ == "__main__":

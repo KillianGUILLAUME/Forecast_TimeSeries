@@ -15,7 +15,10 @@ from streamlit_app_sections import init_session_state, render_etf_analysis_page,
 
 def main() -> None:
     init_session_state()
-    show_header()
+    show_header(
+        page_title="Graphics",
+        page_subtitle="COmpare performance, correlations and risk/rewards profils.",
+    )
     render_etf_analysis_page()
 
 
