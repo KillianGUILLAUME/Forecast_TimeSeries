@@ -461,8 +461,8 @@ class LSTMPredictorProba:
             #num_workers = max(2, min(4, (os.cpu_count() or 2)//1))
 
 
-            train_dl = torch.utils.data.DataLoader(train_ds, batch_size=1024, shuffle=True, drop_last=True, num_workers =0, pin_memory=use_cuda)
-            val_dl = torch.utils.data.DataLoader(val_ds, batch_size=1024, shuffle=False, drop_last=False, num_workers =0, pin_memory=use_cuda)
+            train_dl = torch.utils.data.DataLoader(train_ds, batch_size=512, shuffle=True, drop_last=True, num_workers =2, pin_memory=True)
+            val_dl = torch.utils.data.DataLoader(val_ds, batch_size=512, shuffle=False, drop_last=False, num_workers =2, pin_memory=True)
 
 
             model = LSTMModelProba(
@@ -477,19 +477,14 @@ class LSTMPredictorProba:
                 model = torch.nn.DataParallel(model)   
             model = model.to(device)
 
-            model = model.to(
-                device)            
-            
-
             def criterion(pred, targ):
                 return quantile_loss(pred, targ, quantiles=self.quantiles)
             
-            optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=5e-4)
-            accum_steps = 2
+            optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=1e-3)
+            accum_steps = 4
             steps_per_epoch = math.ceil(len(train_dl) / accum_steps)
             total_steps = self.epochs * steps_per_epoch
 
-            steps_per_epoch = len(train_dl)
             scheduler = torch.optim.lr_scheduler.OneCycleLR(
                 optimizer, max_lr=1e-3, total_steps=total_steps, pct_start=0.3,div_factor=25,final_div_factor=100
             )
@@ -504,21 +499,23 @@ class LSTMPredictorProba:
             amp_enabled = torch.cuda.is_available()
             scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
-            global_step=0
+            def log_cuda_mem(tag=""):
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    print(f"[{tag}] alloc={torch.cuda.memory_allocated()/1e9:.2f} GB | "
+                        f"reserved={torch.cuda.memory_reserved()/1e9:.2f} GB")
 
             
             print("Starting training...")
             for epoch in range(1, self.epochs + 1):
                 model.train()
-                train_sum = torch.zeros((), device = device)
+                train_sum = 0.0
                 seen_train =0
-                running = 0.0
                 optimizer.zero_grad(set_to_none=True)
                 for i, (seqs, targs) in enumerate(train_dl, 1):
                     seqs  = seqs.to(self.device, non_blocking=True).float()
                     targs = targs.to(self.device, non_blocking=True).float()
-            
-                    
+                    log_cuda_mem(f"epoch {epoch} batch {i} (after .to)")
             
                     # --- forward + loss en mixed precision si CUDA dispo
                     with torch.cuda.amp.autocast(enabled=amp_enabled):
@@ -532,17 +529,19 @@ class LSTMPredictorProba:
                         scaler.unscale_(optimizer)
                         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                         scaler.step(optimizer)
+                        log_cuda_mem(f"epoch {epoch} end")
                         scaler.update()
                         optimizer.zero_grad(set_to_none=True)
                         scheduler.step()
 
                     train_sum += (loss.detach() * accum_steps) * seqs.size(0)
                     seen_train += seqs.size(0)
-                    global_step +=1
+                    del seqs, targs, outputs, loss
                 if (i % accum_steps) != 0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     scaler.step(optimizer)
+                    log_cuda_mem(f"epoch {epoch} end")
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
                     scheduler.step()
@@ -551,7 +550,7 @@ class LSTMPredictorProba:
                 model.eval()
 
                 with torch.no_grad():
-                    val_sum = torch.zeros((), device = device)
+                    val_sum = 0.0
                     seen_val = 0
                     for vseqs, vtargs in val_dl:
                         vseqs  = vseqs.to(self.device, non_blocking=True).float()
@@ -561,9 +560,9 @@ class LSTMPredictorProba:
                             vloss = criterion(voutputs, vtargs)
                         val_sum  += vloss.detach() * vseqs.size(0)
                         seen_val += vseqs.size(0)
+                        del vseqs, vtargs, voutputs, vloss
                 val_loss = (val_sum / max(1, seen_val)).item()    
-
-                scheduler.step(val_loss)
+                torch.cuda.empty_cache()
                 
                 if val_loss < best_val_loss_split:
                     best_val_loss_split = val_loss

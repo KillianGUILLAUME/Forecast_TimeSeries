@@ -88,12 +88,12 @@ LSTM_FEATURE_COLUMNS: List[str] = [
 TARGET_COLUMN: str = "ret"
 
 hp = {
-    "window_size": 60, #100
-    "hidden_size": 48, #64
-    "num_layers": 1, #2
-    "lr": 1e-3,
+    "window_size": 150, #100
+    "hidden_size": 64, #64
+    "num_layers": 2, #2
+    "lr": 1e-4,
     "epochs": 3000, #200
-    "horizon": 10,
+    "horizon": 15,
     "residual_boosting": False,
 }
 
