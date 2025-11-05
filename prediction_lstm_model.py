@@ -1,6 +1,6 @@
 #prediction_lstm_model.py
 import time
-
+import psutil
 
 import torch
 import torch.nn as nn
@@ -459,10 +459,11 @@ class LSTMPredictorProba:
 
             
             #num_workers = max(2, min(4, (os.cpu_count() or 2)//1))
+            available_ram_gb = psutil.virtual_memory().available / (1024**3)
+            use_pin_memory = available_ram_gb > 10
 
-
-            train_dl = torch.utils.data.DataLoader(train_ds, batch_size=512, shuffle=True, drop_last=True, num_workers =2, pin_memory=True)
-            val_dl = torch.utils.data.DataLoader(val_ds, batch_size=512, shuffle=False, drop_last=False, num_workers =2, pin_memory=True)
+            train_dl = torch.utils.data.DataLoader(train_ds, batch_size=512, shuffle=True, drop_last=True, num_workers =2, pin_memory=use_pin_memory)
+            val_dl = torch.utils.data.DataLoader(val_ds, batch_size=512, shuffle=False, drop_last=False, num_workers =2, pin_memory=use_pin_memory)
 
 
             model = LSTMModelProba(
@@ -515,24 +516,33 @@ class LSTMPredictorProba:
                 for i, (seqs, targs) in enumerate(train_dl, 1):
                     seqs  = seqs.to(self.device, non_blocking=True).float()
                     targs = targs.to(self.device, non_blocking=True).float()
-                    log_cuda_mem(f"epoch {epoch} batch {i} (after .to)")
-            
-                    # --- forward + loss en mixed precision si CUDA dispo
+
+                    if i == 1:  # Premier batch seulement pour éviter spam
+                        log_cuda_mem(f"TRAIN epoch {epoch} batch {i}: After data.to(device)")
+
                     with torch.cuda.amp.autocast(enabled=amp_enabled):
                         outputs = model(seqs)
+
+                        if i == 1:
+                            log_cuda_mem(f"TRAIN epoch {epoch} batch {i}: After forward")
+
                         loss = criterion(outputs, targs) / accum_steps
             
-                    # --- backward (échelle fp16)
                     scaler.scale(loss).backward()
+
+                    if i == 1:
+                        log_cuda_mem(f"TRAIN epoch {epoch} batch {i}: After backward")
 
                     if i % accum_steps == 0:
                         scaler.unscale_(optimizer)
                         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                         scaler.step(optimizer)
-                        log_cuda_mem(f"epoch {epoch} end")
                         scaler.update()
                         optimizer.zero_grad(set_to_none=True)
                         scheduler.step()
+
+                    if i == accum_steps:  
+                        log_cuda_mem(f"TRAIN epoch {epoch} batch {i}: After optimizer.step")
 
                     train_sum += (loss.detach() * accum_steps) * seqs.size(0)
                     seen_train += seqs.size(0)
@@ -541,7 +551,6 @@ class LSTMPredictorProba:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     scaler.step(optimizer)
-                    log_cuda_mem(f"epoch {epoch} end")
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
                     scheduler.step()
@@ -578,6 +587,7 @@ class LSTMPredictorProba:
                 lr_to_plot[epoch-1]=optimizer.param_groups[0]['lr']
                 loss_plot[epoch-1]=train_loss
                 val_plot[epoch-1]=val_loss
+                log_cuda_mem(f"EPOCH {epoch}: End (train_loss={train_loss:.4f}, val_loss={val_loss:.4f})")
                 if (epoch+1) % 25 == 0:
                     print(f'Epoch [{epoch+1}/{self.epochs}]| Train: {train_loss:.4f} | val: {val_loss:.4f} | LR: {optimizer.param_groups[0]["lr"]:.6f}')
             
